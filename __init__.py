@@ -90,13 +90,26 @@ class AntigravityOAuthProfile(ProviderProfile):
         api_key: str | None = None,
         base_url: str | None = None,
         timeout: float = 15.0,
+        use_cache: bool = True,
     ) -> list[str] | None:
         """Query `agy models` and normalize to clean, deduplicated base models.
-        
+
         Separates model families from thinking efforts (e.g. `gemini-3.8-flash-{low,medium,high}`
         becomes `gemini-3.8-flash`), allowing Hermes' native reasoning effort picker to handle
         the thinking depth cleanly.
+
+        `agy models` hits the network on every call (~2s), and Hermes calls
+        this on every provider/model switch, so a fresh file cache (TTL 1h,
+        see models.models_cache_ttl) is returned without spawning agy. A
+        stale cache is still preferred over the hardcoded fallback when the
+        live call fails.
         """
+        try:
+            from .models import clean_base_models, load_models_cache, models_cache_ttl, save_models_cache
+        except ImportError:
+            # Loaded outside a package (e.g. a flat source tree under test):
+            # the absolute name is the same module.
+            from models import clean_base_models, load_models_cache, models_cache_ttl, save_models_cache
         try:
             from .client import resolve_agy_command
         except ImportError:
@@ -104,6 +117,11 @@ class AntigravityOAuthProfile(ProviderProfile):
             # the absolute name is the same module.
             from client import resolve_agy_command
 
+        ttl = models_cache_ttl()
+        if use_cache and ttl > 0:
+            cached = load_models_cache(ttl)
+            if cached:
+                return cached
         cmd = resolve_agy_command()
         try:
             res = subprocess.run(
@@ -124,21 +142,18 @@ class AntigravityOAuthProfile(ProviderProfile):
                         raw_models.append(model_id)
 
             if raw_models:
-                clean_models: list[str] = []
-                seen: set[str] = set()
-                for m in raw_models:
-                    base = m
-                    for suffix in ("-high", "-medium", "-low"):
-                        if m.endswith(suffix) and (m.startswith("gemini-") or "flash" in m or "pro" in m):
-                            base = m[:-len(suffix)]
-                            break
-                    if base not in seen:
-                        seen.add(base)
-                        clean_models.append(base)
+                clean_models = clean_base_models(raw_models)
+                if use_cache and ttl > 0:
+                    save_models_cache(clean_models)
                 return clean_models
         except Exception as exc:
             logger.debug("Antigravity fetch_models failed: %s", exc)
 
+        if use_cache and ttl > 0:
+            stale = load_models_cache(None)
+            if stale:
+                logger.debug("Antigravity fetch_models: serving stale catalog cache")
+                return stale
         return list(_FALLBACK_MODELS)
 
     def get_model_context_length(self, model: str) -> int | None:

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
+import time
+from pathlib import Path
 from typing import Any
 
 _FALLBACK_MODELS = [
@@ -85,3 +89,92 @@ def resolve_model_and_effort(
         # Local patch: agy rejects --effort for non-Gemini models (claude-*, gpt-oss-*):
         # "--effort is not supported for model ...". Their effort, if any, is baked into the id.
         return m, None
+
+
+# --- Model catalog cache -------------------------------------------------
+# `agy models` hits the network on every invocation ("Fetching available
+# models...", ~2s), and Hermes calls fetch_models() on every provider/model
+# switch. A file cache with a TTL keeps switches instant while staying
+# fresh; any live failure falls back to the stale cache, then to
+# _FALLBACK_MODELS. All helpers are best-effort and never raise.
+
+_MODELS_CACHE_TTL_SECONDS = 3600.0
+_MODELS_CACHE_DIRNAME = "hermes-antigravity-oauth"
+_MODELS_CACHE_FILENAME = "models.json"
+
+
+def models_cache_ttl() -> float:
+    """Cache TTL in seconds; ANTIGRAVITY_MODELS_CACHE_TTL overrides, <= 0 disables."""
+    try:
+        return float(os.getenv("ANTIGRAVITY_MODELS_CACHE_TTL", str(_MODELS_CACHE_TTL_SECONDS)))
+    except ValueError:
+        return _MODELS_CACHE_TTL_SECONDS
+
+
+def models_cache_path() -> Path:
+    """Cache file location; ANTIGRAVITY_MODELS_CACHE_FILE overrides the full path."""
+    override = os.getenv("ANTIGRAVITY_MODELS_CACHE_FILE", "").strip()
+    if override:
+        return Path(override)
+    base = os.getenv("XDG_CACHE_HOME", "").strip()
+    if base:
+        return Path(base) / _MODELS_CACHE_DIRNAME / _MODELS_CACHE_FILENAME
+    return Path.home() / ".cache" / _MODELS_CACHE_DIRNAME / _MODELS_CACHE_FILENAME
+
+
+def load_models_cache(max_age_seconds: float | None) -> list[str] | None:
+    """Return cached base model ids, or None on any miss/problem.
+
+    max_age_seconds=None accepts a cache of any age (stale fallback);
+    otherwise only a cache written within the age is returned.
+    """
+    try:
+        path = models_cache_path()
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        models = raw.get("models") if isinstance(raw, dict) else None
+        fetched_at = raw.get("fetched_at") if isinstance(raw, dict) else None
+        if (not isinstance(models, list) or not models
+                or not all(isinstance(m, str) and m.strip() for m in models)
+                or not isinstance(fetched_at, (int, float))):
+            return None
+        if max_age_seconds is not None and (time.time() - float(fetched_at)) > max_age_seconds:
+            return None
+        return list(models)
+    except (OSError, ValueError):
+        return None
+
+
+def save_models_cache(models: list[str]) -> None:
+    """Persist base model ids; silently ignored on any filesystem problem."""
+    if not models:
+        return
+    try:
+        path = models_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps({"fetched_at": time.time(), "models": list(models)}),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def clean_base_models(raw_ids: list[str]) -> list[str]:
+    """Normalize raw `agy models` ids to deduplicated base names.
+
+    `gemini-3.8-flash-{low,medium,high}` becomes `gemini-3.8-flash` so
+    Hermes' reasoning-effort picker handles depth; non-Gemini ids keep
+    their baked-in effort suffix.
+    """
+    clean_models: list[str] = []
+    seen: set[str] = set()
+    for m in raw_ids:
+        base = m
+        for suffix in ("-high", "-medium", "-low"):
+            if m.endswith(suffix) and (m.startswith("gemini-") or "flash" in m or "pro" in m):
+                base = m[: -len(suffix)]
+                break
+        if base not in seen:
+            seen.add(base)
+            clean_models.append(base)
+    return clean_models

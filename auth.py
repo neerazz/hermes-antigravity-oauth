@@ -43,7 +43,8 @@ def verify_session(agy: str, timeout: float = _VERIFY_TIMEOUT_S) -> tuple[bool, 
         res = subprocess.run([agy, "models"], capture_output=True, text=True, timeout=timeout,
                              stdin=subprocess.DEVNULL, check=False)
     except subprocess.TimeoutExpired:
-        return False, [], f"`agy models` timed out after {timeout:.0f}s"
+        return False, [], (f"`agy models` timed out after {timeout:.0f}s "
+                           "(first run can be slow while agy fetches the model catalog)")
     except OSError as exc:
         return False, [], f"could not run agy: {exc}"
     models = [ln.split()[0] for ln in res.stdout.splitlines()
@@ -59,13 +60,15 @@ def probe(*, live: bool = False) -> dict[str, Any]:
     agy = _agy_path()
     if not agy:
         return {"available": False, "logged_in": False, "plan": "", "login_command": None,
-                "detail": f"Antigravity CLI (agy) not found. Install it from {INSTALL_URL} "
+                "detail": f"Antigravity CLI (agy) not found (searched PATH, ~/.gemini/antigravity-cli/bin, "
+                          f"/usr/local/bin). Install it from {INSTALL_URL} "
                           "or run `npx hermes-antigravity-oauth --yes`."}
     logged_in, detail = is_authenticated(), ""
     if live or logged_in:
         logged_in, _, detail = verify_session(agy)
     if not logged_in:
-        detail = f"Not signed in to Antigravity ({detail or 'no saved agy session'}). Run `hermes auth add {PROVIDER_ID}`."
+        detail = (f"Not signed in to Antigravity ({detail or 'no saved agy session'}; "
+                  f"checked with {agy}). Run `hermes auth add {PROVIDER_ID}`.")
     return {"available": True, "logged_in": logged_in, "plan": "", "command": agy,
             "login_command": login_command(agy), "detail": detail or "signed in"}
 
@@ -95,6 +98,15 @@ def _add(args: Any) -> None:
     ok, models, detail = verify_session(agy)
     if not ok:
         raise SystemExit(f"Sign-in did not complete (agy exit {rc}; {detail}).")
+    try:
+        try:
+            from .models import clean_base_models, save_models_cache
+        except ImportError:  # flat source tree under test
+            from models import clean_base_models, save_models_cache
+        save_models_cache(clean_base_models([m for m in models if any(
+            c in m.lower() for c in ("gemini", "claude", "gpt", "model"))]))
+    except Exception:
+        pass  # cache warming is best-effort; sign-in already succeeded
     print(f"\n{PROVIDER_ID}: signed in. {detail}.")
     print(f"Use it: hermes --provider {PROVIDER_ID} -m {_base_model(models[0])}")
 

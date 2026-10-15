@@ -80,5 +80,60 @@ class StreamBridgeTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+def _transcript(root, conversation_id, tool_calls):
+    logs = Path(root) / "brain" / conversation_id / ".system_generated" / "logs"
+    logs.mkdir(parents=True)
+    lines = [json.dumps({"step_index": 0, "type": "USER_INPUT", "content": "x"}),
+             json.dumps({"step_index": 1, "type": "PLANNER_RESPONSE", "tool_calls": tool_calls})]
+    (logs / "transcript_full.jsonl").write_text("\n".join(lines) + "\n")
+
+
+class TruncatedPreviewTests(unittest.TestCase):
+    """agy stream events cut string params to 512 chars + an ellipsis (live-verified 2026-10-12)."""
+
+    FULL = "python3 -c \"" + "print('x')\n" * 120 + "print('END')\""
+
+    def preview(self):
+        return self.FULL[:512] + native_tools.ELLIPSIS
+
+    def test_preview_is_detected_only_at_the_agy_limit(self):
+        self.assertEqual(native_tools.truncated_keys({"CommandLine": self.preview(), "Cwd": "/tmp"}), ["CommandLine"])
+        self.assertEqual(native_tools.truncated_keys({"CommandLine": "echo hi" + native_tools.ELLIPSIS}), [])
+
+    def test_full_command_is_restored_from_the_transcript(self):
+        with tempfile.TemporaryDirectory() as d:
+            _transcript(d, "conv1", [{"name": "run_command", "args": {"CommandLine": self.FULL, "Cwd": "/tmp"}}])
+            full = native_tools.restore_truncated({"CommandLine": self.preview(), "Cwd": "/tmp"},
+                                                  "run_command", "conv1", [Path(d)], wait=0)
+        self.assertEqual(full["CommandLine"], self.FULL)
+
+    def test_mismatching_transcript_or_missing_file_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            _transcript(d, "conv1", [{"name": "run_command", "args": {"CommandLine": "rm -rf /tmp/other " + "x" * 600}}])
+            self.assertIsNone(native_tools.restore_truncated({"CommandLine": self.preview()}, "run_command",
+                                                             "conv1", [Path(d)], wait=0))
+            self.assertIsNone(native_tools.restore_truncated({"CommandLine": self.preview()}, "run_command",
+                                                             "nope", [Path(d)], wait=0))
+
+    def test_translate_never_emits_a_cut_command(self):
+        step = _step("run_command", {"CommandLine": self.preview(), "Cwd": "/tmp"})
+        self.assertIsNone(native_tools.translate(step, {"terminal"}, 0))
+        self.assertIsNone(native_tools.translate(step, {"terminal"}, 0, resolve=lambda p, n: None))
+        call = native_tools.translate(step, {"terminal"}, 0,
+                                      resolve=lambda p, n: dict(p, CommandLine=self.FULL))
+        self.assertEqual(json.loads(call.function.arguments)["command"], self.FULL)
+
+    def test_transcript_written_slightly_after_the_event_is_waited_for(self):
+        import threading
+        with tempfile.TemporaryDirectory() as d:
+            timer = threading.Timer(0.3, _transcript, args=(d, "conv2",
+                                    [{"name": "run_command", "args": {"CommandLine": self.FULL}}]))
+            timer.start()
+            full = native_tools.restore_truncated({"CommandLine": self.preview()}, "run_command",
+                                                  "conv2", [Path(d)], wait=2)
+            timer.join()
+        self.assertEqual(full["CommandLine"], self.FULL)
+
+
 if __name__ == "__main__":
     unittest.main()

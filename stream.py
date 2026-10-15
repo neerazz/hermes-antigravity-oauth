@@ -395,6 +395,17 @@ class AntigravityStream(Iterator[Any]):
         # already-shut-down executor accepts shutdown() again.
         self._retire_executor()
 
+    def _resolve_truncated(self, params: dict[str, Any], native: str) -> dict[str, Any] | None:
+        """Full tool arguments from agy's transcript when the stream event only carried a preview."""
+        from pathlib import Path
+        dirs = [getattr(self.client, "_isolated_gemini_dir", None),
+                Path.home() / ".gemini" / "antigravity-cli"]
+        full = _native_tools.restore_truncated(params, native, self.conversation_id or "", [d for d in dirs if d])
+        if full is None:
+            logger.warning("Antigravity native tool '%s' arrived with truncated arguments and the full text "
+                           "was not found in the transcript; not executing a partial command.", native)
+        return full
+
     def _make_chunk(
         self,
         *,
@@ -567,7 +578,8 @@ class AntigravityStream(Iterator[Any]):
                     if not self.conversation_id:
                         self.conversation_id = step.get("conversation_id", "")
                     if step.get("step_type") == "tool":
-                        call = _native_tools.translate(step, self.tool_names, index=0) if not has_tool_calls else None
+                        call = _native_tools.translate(step, self.tool_names, index=0,
+                                                       resolve=self._resolve_truncated) if not has_tool_calls else None
                         if call is not None:
                             logger.info("Antigravity native tool '%s' re-issued as Hermes tool '%s'.",
                                         step.get("tool_name"), call.function.name)

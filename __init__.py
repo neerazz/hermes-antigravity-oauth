@@ -11,10 +11,14 @@ import logging
 import os
 import re
 import subprocess
-from typing import Any
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from providers import register_provider
 from providers.base import ProviderProfile
+
+if TYPE_CHECKING:
+    from agent.account_usage import AccountUsageSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +147,36 @@ class AntigravityOAuthProfile(ProviderProfile):
             logger.debug("Antigravity fetch_models failed: %s", exc)
 
         return None
+
+    def fetch_account_usage(
+        self, *, base_url: str | None = None, api_key: str | None = None
+    ) -> AccountUsageSnapshot | None:
+        """`/usage` hook: weekly quota windows reported by `agy -p /usage`, or None."""
+        try:
+            from .usage import fetch_usage_report
+        except ImportError:  # flat source tree under test
+            from usage import fetch_usage_report
+
+        report = fetch_usage_report()
+        if report is None:
+            return None
+        from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+
+        return AccountUsageSnapshot(
+            provider=self.name,
+            source="agy_usage",
+            fetched_at=datetime.now(timezone.utc),
+            windows=tuple(
+                AccountUsageWindow(
+                    label=window.label,
+                    used_percent=window.used_percent,
+                    reset_at=window.reset_at,
+                    detail=window.detail,
+                )
+                for window in report.windows
+            ),
+            raw=report.raw,
+        )
 
     def get_model_context_length(self, model: str) -> int | None:
         """Defer to Hermes-native metadata unless a positive override is set.

@@ -191,8 +191,73 @@ def _classify_antigravity_error(
 ) -> dict[str, Any] | None:
     """Classify agy CLI specific runtime errors so Hermes' smart failover /
     recovery pipeline triggers auto-compression and retry instead of failing.
+
+    Three deterministic/terminal categories are recognized here so Hermes'
+    turn_api_error retry loop stops burning its 3-attempt budget on a verdict
+    that cannot change on an unmodified retry:
+
+    * Native-tool mismatch (stream.py's ``Antigravity tool unsupported: ...``):
+      deterministic per profile — the model will keep calling the same
+      unsupported native tool on an identical retry, since nothing about the
+      request changed. Confirmed live against a Hermes deployment: a turn
+      hitting this retried the exact same message 3/3 times before giving up,
+      each attempt ~15-18s apart for no chance of success. Classified like
+      Hermes' own ``_V_MALFORMED_TOOL_ARGS`` precedent in
+      agent/error_classifier.py (format_error, non-retryable, no fallback):
+      the broken turn is aborted instead of replayed unchanged.
+    * Explicit quota wall (process.py's ``_check_early_quota_error``, which
+      already recognizes agy's own ``RESOURCE_EXHAUSTED`` / "Individual quota
+      reached" / 429 log lines and is documented there as surfacing only
+      AFTER agy's internal ~140s/8-attempt retry budget is already
+      exhausted): an additional Hermes-level retry on the same window cannot
+      succeed, so this is marked non-retryable while still allowed to fall
+      over to a different model/provider.
+    * Explicit auth rejection (client.py's own "Antigravity CLI is not
+      authenticated..." pre-flight raise, and agy 1.3.x's own "Authentication
+      expired. Please log back in." wording — see agy's `changelog`
+      subcommand, 1.3.4 notes): re-running the identical request cannot
+      restore a session that requires an interactive `agy` login; marked
+      non-retryable so the user sees one clear message instead of 3 retries.
+
+    The pre-existing ``context_overflow`` patterns below are unchanged.
     """
     err_str = f"{error} {message}".lower()
+
+    if "antigravity tool unsupported" in err_str:
+        return {
+            "reason": "format_error",
+            "retryable": False,
+            "should_fallback": False,
+        }
+
+    if any(
+        pattern in err_str
+        for pattern in (
+            "resource_exhausted",
+            "individual quota reached",
+            "quota exceeded",
+            "code 429",
+        )
+    ):
+        return {
+            "reason": "rate_limit",
+            "retryable": False,
+            "should_fallback": True,
+        }
+
+    if any(
+        pattern in err_str
+        for pattern in (
+            "antigravity cli is not authenticated",
+            "authentication expired",
+        )
+    ):
+        return {
+            "reason": "auth_permanent",
+            "retryable": False,
+            "should_fallback": True,
+        }
+
     if any(
         pattern in err_str
         for pattern in (

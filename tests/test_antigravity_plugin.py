@@ -749,6 +749,53 @@ class AntigravityPluginTests(unittest.TestCase):
         verdict4 = hook(RuntimeError("Invalid API key or unauthorized"))
         self.assertIsNone(verdict4)
 
+        # Deterministic native-tool mismatch: retried 3/3 identically pre-fix;
+        # must now be marked non-retryable with no fallback (same recovery
+        # shape as Hermes' own _V_MALFORMED_TOOL_ARGS precedent for
+        # unfixable-by-retry turns).
+        verdict5 = hook(RuntimeError(
+            "Antigravity tool unsupported: the model called agy's native tool "
+            "'run_command', which has no equivalent among this profile's "
+            "enabled Hermes tools."
+        ))
+        self.assertEqual(
+            verdict5,
+            {"reason": "format_error", "retryable": False, "should_fallback": False},
+        )
+
+        # Explicit quota wall surfaced via process._check_early_quota_error
+        # AFTER agy's own ~140s/8-attempt internal retry budget is already
+        # exhausted: a further Hermes-level retry on the same window cannot
+        # succeed, so this must be non-retryable; fallback to a different
+        # model/provider is still allowed.
+        verdict6 = hook(RuntimeError(
+            "Antigravity model error: RESOURCE_EXHAUSTED: Individual quota reached "
+            "for model gemini-3.8-flash"
+        ))
+        self.assertEqual(
+            verdict6,
+            {"reason": "rate_limit", "retryable": False, "should_fallback": True},
+        )
+
+        # Explicit, non-refreshable auth rejection (client.py pre-flight raise,
+        # and agy 1.3.x's own "Authentication expired." wording per its
+        # changelog): re-running the identical request cannot succeed without
+        # an interactive `agy` login, so this must be non-retryable.
+        verdict7 = hook(RuntimeError(
+            "Antigravity CLI is not authenticated. Please run 'agy' in your "
+            "terminal to log in with your Google account."
+        ))
+        self.assertEqual(
+            verdict7,
+            {"reason": "auth_permanent", "retryable": False, "should_fallback": True},
+        )
+
+        verdict8 = hook(RuntimeError("Antigravity model error: Authentication expired. Please log back in."))
+        self.assertEqual(
+            verdict8,
+            {"reason": "auth_permanent", "retryable": False, "should_fallback": True},
+        )
+
     def test_hermes_error_classifier_integration(self):
         try:
             from agent.error_classifier import classify_api_error, FailoverReason
@@ -760,6 +807,41 @@ class AntigravityPluginTests(unittest.TestCase):
         self.assertEqual(classified.reason, FailoverReason.context_overflow)
         self.assertTrue(classified.retryable)
         self.assertTrue(classified.should_compress)
+
+    def test_hermes_error_classifier_integration_non_retryable_categories(self):
+        """End-to-end through Hermes' real classify_api_error, not just the plugin hook
+        in isolation: confirms _profile_verdict actually reads our dict and that
+        retryable=False survives the full stage pipeline unmodified."""
+        try:
+            from agent.error_classifier import classify_api_error, FailoverReason
+        except ImportError:
+            self.skipTest("Hermes agent not installed in test environment")
+
+        tool_err = RuntimeError(
+            "Antigravity tool unsupported: the model called agy's native tool 'run_command', "
+            "which has no equivalent among this profile's enabled Hermes tools."
+        )
+        classified = classify_api_error(tool_err, provider="antigravity-oauth")
+        self.assertEqual(classified.reason, FailoverReason.format_error)
+        self.assertFalse(classified.retryable)
+        self.assertFalse(classified.should_fallback)
+
+        quota_err = RuntimeError(
+            "Antigravity model error: RESOURCE_EXHAUSTED: Individual quota reached"
+        )
+        classified = classify_api_error(quota_err, provider="antigravity-oauth")
+        self.assertEqual(classified.reason, FailoverReason.rate_limit)
+        self.assertFalse(classified.retryable)
+        self.assertTrue(classified.should_fallback)
+
+        auth_err = RuntimeError(
+            "Antigravity CLI is not authenticated. Please run 'agy' in your terminal "
+            "to log in with your Google account."
+        )
+        classified = classify_api_error(auth_err, provider="antigravity-oauth")
+        self.assertEqual(classified.reason, FailoverReason.auth_permanent)
+        self.assertFalse(classified.retryable)
+        self.assertTrue(classified.should_fallback)
 
     def test_security_default_args_omit_dangerous_permissions(self):
         # TemporaryDirectory (not /tmp): on Windows "/tmp" resolves to a

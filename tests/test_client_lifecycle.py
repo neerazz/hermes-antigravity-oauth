@@ -34,16 +34,23 @@ close the client explicitly on the success path only, and the per-test
 TemporaryDirectory cleanup still removes the workspace.
 """
 
+import contextlib
 import gc
 import io
 import json
 import os
 import shutil
+import signal
 import stat
+import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
+import time
 import unittest
+import warnings
+import weakref
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -846,6 +853,118 @@ class WorkspaceCleanupTests(unittest.TestCase):
         self.assertEqual(events, ["terminate", "cleanup"])
         self.assertTrue(client.is_closed)
         self.addCleanup(shutil.rmtree, workspace_path, ignore_errors=True)
+
+
+# Stand-in persistent worker for ExitWithoutCloseTests: holds a file open
+# inside the workspace, as agy holds conversations/*.db, and appends to a
+# heartbeat file OUTSIDE the workspace for as long as it runs. Self-exits
+# after 30s so a failing run cannot leave it behind for long.
+_HOLDER_CODE = textwrap.dedent(
+    """
+    import sys, time
+    held = open(sys.argv[1], "w")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        with open(sys.argv[2], "a") as beat:
+            beat.write(".")
+        time.sleep(0.05)
+    """
+)
+
+# Child interpreter for ExitWithoutCloseTests: builds a client, adopts the
+# stand-in as its persistent worker, and exits WITHOUT close() -- the way
+# `hermes chat --oneshot` leaves.
+_EXIT_WITHOUT_CLOSE_CHILD = textwrap.dedent(
+    """
+    import json, os, subprocess, sys, time
+    plugin_dir, holder_python, holder_code, beat = sys.argv[1:5]
+    sys.path.insert(0, plugin_dir)
+    import process
+    # Same seams the in-process suites pin: never link the real token or keychains.
+    process.resolve_real_token_path = lambda: None
+    process._link_macos_keychains = lambda isolated_home: None
+    import client
+    c = client.AntigravityClient(command="agy")
+    conversations = os.path.join(c._cwd, "home", ".gemini", "antigravity-cli", "conversations")
+    os.makedirs(conversations, exist_ok=True)
+    holder = subprocess.Popen(
+        [holder_python, "-c", holder_code, os.path.join(conversations, "x.db"), beat],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        **process._own_process_group(),
+    )
+    deadline = time.monotonic() + 10
+    while not os.path.exists(beat) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    with c._lock:  # adopt it exactly as _get_or_spawn_worker does
+        c._worker_proc = holder
+        c._active_processes.add(holder)
+    print(json.dumps({"workspace": c._cwd, "pid": holder.pid}), flush=True)
+    """
+)
+
+
+def _kill_pid(pid: int) -> None:
+    """Best-effort kill of a stand-in worker that outlived its test."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, check=False)
+    else:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+
+
+class ExitWithoutCloseTests(unittest.TestCase):
+    """A client its host never closes is closed at interpreter exit.
+
+    Exit-path gap reported in GitHub issue neerazz/hermes-antigravity-oauth#4:
+    ``hermes chat --oneshot`` exits without closing the provider client.
+    The only cleanup left was TemporaryDirectory's weakref finalizer, which
+    ran while the worker still held conversations/*.db: a WinError 32
+    traceback at exit and a leaked workspace on Windows, and a worker left
+    running on every platform.
+    """
+
+    def test_unclosed_client_is_closed_at_interpreter_exit(self):
+        scratch = tempfile.mkdtemp(prefix="hermes_agy_exit_test_")
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        beat = os.path.join(scratch, "heartbeat")
+        # On Windows a venv python.exe is a launcher that runs the real
+        # interpreter as a child; terminating the launcher would leave the
+        # file holder running, so the holder uses the base interpreter.
+        holder_python = getattr(sys, "_base_executable", None) or sys.executable
+        result = subprocess.run(
+            [sys.executable, "-c", _EXIT_WITHOUT_CLOSE_CHILD,
+             str(plugin_dir), holder_python, _HOLDER_CODE, beat],
+            capture_output=True, text=True, errors="replace", timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        info = json.loads(result.stdout.strip().splitlines()[-1])
+        self.addCleanup(shutil.rmtree, info["workspace"], ignore_errors=True)
+        self.addCleanup(_kill_pid, info["pid"])  # cleanups run LIFO: kill first
+
+        beats = os.path.getsize(beat)
+        time.sleep(0.5)  # ten heartbeats if the worker were still running
+        self.assertEqual(os.path.getsize(beat), beats, "worker still running after exit")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(os.path.exists(info["workspace"]), "workspace leaked")
+
+    def test_exit_hook_is_weak_and_removed_by_close(self):
+        _pin_host_dependent_seams(self)
+        with patch("client.atexit") as fake_atexit:
+            closed = AntigravityClient()
+            closed.close()
+            dropped = AntigravityClient()
+        closed_hook, dropped_hook = (call.args[0] for call in fake_atexit.register.call_args_list)
+        # close() removes its own hook: a long-running host does not pile them up.
+        fake_atexit.unregister.assert_called_once_with(closed_hook)
+        # The hook never keeps an unclosed client alive ...
+        ref = weakref.ref(dropped)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)  # left unclosed on purpose
+            del dropped
+            gc.collect()
+        self.assertIsNone(ref())
+        # ... and running it for a collected client is a silent no-op.
+        dropped_hook()
 
 
 class StaleStreamFinalizationTests(unittest.TestCase):

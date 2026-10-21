@@ -7,7 +7,9 @@ existing Antigravity / Gemini subscription quota.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -17,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -211,6 +214,39 @@ def _force_rmtree(path: str) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _close_at_exit(client_ref: weakref.ReferenceType) -> None:
+    """Interpreter-exit hook: close a client its host never closed.
+
+    Exit-path gap reported in GitHub issue neerazz/hermes-antigravity-oauth#4:
+    ``hermes chat --oneshot`` exits without closing the main provider
+    client, so the only remaining cleanup was TemporaryDirectory's own
+    weakref finalizer. That finalizer runs while the persistent agy worker
+    is still alive and holding ``conversations/*.db``, fails with WinError
+    32 on Windows, prints a traceback and leaves the workspace -- including
+    the session's agy conversation record -- behind. Routing exit through
+    ``close()`` reuses its load-bearing order: terminate every process
+    first, then remove the workspace with retries.
+
+    Ordering: atexit runs callbacks last-in-first-out, and weakref.finalize
+    registers its own exit callback no later than the first finalizer
+    (here: the client's TemporaryDirectory). The hook is registered after
+    that, so it always runs before the TemporaryDirectory finalizer.
+
+    The hook holds only a weak reference, so it never keeps a client
+    alive, and ``close()`` unregisters it, so a closed client leaves no
+    hook behind in a long-running host. A host that leaves via ``os._exit``
+    skips atexit entirely; nothing in-process can clean up on that path.
+    """
+    client = client_ref()
+    if client is None:
+        return
+    try:
+        client.close()
+    except Exception:
+        # An exit hook must not print a traceback -- that is the symptom.
+        logger.debug("Antigravity client close at interpreter exit failed", exc_info=True)
+
+
 class AntigravityClient:
     """OpenAI-compatible client facade driving Antigravity CLI.
 
@@ -309,6 +345,10 @@ class AntigravityClient:
         # session cannot corrupt a later session's baseline.
         self._worker_usage_baseline: dict[str, int] = {}
         self._worker_lock = threading.Lock()
+        # Registered last, once every attribute close() reads exists; see
+        # _close_at_exit for why this cannot be left to the host.
+        self._exit_hook = functools.partial(_close_at_exit, weakref.ref(self))
+        atexit.register(self._exit_hook)
 
     @staticmethod
     def _resolve_real_token_path() -> Path | None:
@@ -335,6 +375,7 @@ class AntigravityClient:
         self.close()
 
     def close(self) -> None:
+        atexit.unregister(self._exit_hook)
         # Phase 1 -- terminate every child process BEFORE the workspace is
         # touched (issue #4): on Windows a still-running agy keeps
         # conversations/*.db open, and taskkill /F /T is asynchronous, so

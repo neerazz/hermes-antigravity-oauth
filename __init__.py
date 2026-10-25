@@ -150,6 +150,7 @@ class AntigravityOAuthProfile(ProviderProfile):
                 text=True,
                 stdin=subprocess.DEVNULL,
                 timeout=timeout,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0,
             )
             if res.returncode != 0:
                 logger.debug("Antigravity model discovery exited %s", res.returncode)

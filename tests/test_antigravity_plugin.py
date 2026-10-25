@@ -737,7 +737,8 @@ class AntigravityPluginTests(unittest.TestCase):
             _pkg.subprocess, "run", return_value=SimpleNamespace(stdout=output, returncode=returncode)
         ) as run:
             result = get_provider_profile("antigravity-oauth").fetch_models(timeout=2.5)
-            run.assert_called_once_with(["fixture-agy", "models"], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=2.5)
+            run.assert_called_once_with(["fixture-agy", "models"], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=2.5,
+                                        creationflags=0x08000000 if os.name == "nt" else 0)
             return result
 
     def test_fetch_models_exact_native_ids(self):
@@ -1891,7 +1892,7 @@ class AntigravityPluginTests(unittest.TestCase):
         from client import _own_process_group
         with patch("os.name", "nt"):
             flags = _own_process_group()
-            self.assertEqual(flags, {"creationflags": 0x00000200})
+            self.assertEqual(flags, {"creationflags": 0x00000200 | 0x08000000})
         with patch("os.name", "posix"):
             flags = _own_process_group()
             self.assertEqual(flags, {"start_new_session": True})
@@ -1909,7 +1910,20 @@ class AntigravityPluginTests(unittest.TestCase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                creationflags=0x08000000,
             )
+
+    def test_windows_background_helpers_hide_console(self):
+        import auth
+        import process
+        import usage
+        failed = subprocess.CompletedProcess([], 1, "", "")
+        with patch("os.name", "nt"), patch("subprocess.run", return_value=failed) as run:
+            auth.verify_session("agy")
+            process._windows_credential_present()
+            usage._kill_agy_tree(MagicMock(pid=4321))
+        self.assertEqual([c.args[0][0] for c in run.call_args_list], ["agy", "cmdkey", "taskkill"])
+        self.assertTrue(all(c.kwargs["creationflags"] == 0x08000000 for c in run.call_args_list))
 
     def test_child_env_windows_userprofile(self):
         # TemporaryDirectory (not /tmp): on Windows "/tmp" resolves to a
@@ -1923,6 +1937,7 @@ class AntigravityPluginTests(unittest.TestCase):
         self.assertIn("USERPROFILE", env)
         self.assertEqual(env["HOME"], str(client._isolated_home))
         self.assertEqual(env["USERPROFILE"], str(client._isolated_home))
+        self.assertEqual(env["AGY_CLI_DISABLE_AUTO_UPDATE"], "true")
         client.close()
 
     def test_token_linking_fallback_chain(self):

@@ -41,7 +41,8 @@ def verify_session(agy: str, timeout: float = _VERIFY_TIMEOUT_S) -> tuple[bool, 
     """Live check: `agy models` only succeeds for a signed-in account. Returns (ok, model_ids, detail)."""
     try:
         res = subprocess.run([agy, "models"], capture_output=True, text=True, timeout=timeout,
-                             stdin=subprocess.DEVNULL, check=False)
+                             stdin=subprocess.DEVNULL, check=False,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0)
     except subprocess.TimeoutExpired:
         return False, [], f"`agy models` timed out after {timeout:.0f}s"
     except OSError as exc:

@@ -42,6 +42,10 @@ class TestStreamGeneratorPerformance(unittest.TestCase):
             timeout=5.0
         )
 
+        # Let the child finish first so the timer measures only EOF detection,
+        # not interpreter startup (which alone can exceed 50 ms on a loaded host).
+        proc.wait(timeout=10)
+
         start_time = time.monotonic()
 
         # Iterate over the generator. It should yield the content and finish chunk.

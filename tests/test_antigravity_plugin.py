@@ -17,6 +17,12 @@ plugin_dir = Path(__file__).resolve().parent.parent
 if str(plugin_dir) not in sys.path:
     sys.path.insert(0, str(plugin_dir))
 
+# Hermetic: provider discovery scans $HERMES_HOME/plugins. On a host where this
+# plugin is also installed, discovery would register that copy under another
+# package name and get_provider_profile() would return it, so patches against
+# `antigravity_plugin_entry` miss and the real agy binary runs.
+os.environ["HERMES_HOME"] = tempfile.mkdtemp(prefix="agy_test_home_")
+
 try:
     from providers import get_provider_profile
 except ImportError:

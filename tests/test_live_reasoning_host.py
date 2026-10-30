@@ -13,7 +13,19 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, str(Path.home()/'.hermes'/'hermes-agent'))
+import os
+import tempfile
+
+# Hermetic HERMES_HOME holding only this checkout as an installed plugin, so
+# provider discovery finds the code under test (not a host-installed copy, and
+# not nothing at all on a clean CI runner).
+_HERMES_HOME = tempfile.mkdtemp(prefix='agy_host_test_')
+os.makedirs(os.path.join(_HERMES_HOME, 'plugins'))
+os.symlink(Path(__file__).resolve().parent.parent, os.path.join(_HERMES_HOME, 'plugins', 'antigravity-oauth'))
+os.environ['HERMES_HOME'] = _HERMES_HOME
+
+# Fallback for a local run without PYTHONPATH; never shadow an explicit checkout.
+sys.path.append(str(Path.home()/'.hermes'/'hermes-agent'))
 import hermes_bootstrap
 from hermes_cli.plugins_discovery import suppress_plugin_discovery
 

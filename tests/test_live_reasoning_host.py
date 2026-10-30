@@ -23,6 +23,13 @@ _HERMES_HOME = tempfile.mkdtemp(prefix='agy_host_test_')
 os.makedirs(os.path.join(_HERMES_HOME, 'plugins'))
 os.symlink(Path(__file__).resolve().parent.parent, os.path.join(_HERMES_HOME, 'plugins', 'antigravity-oauth'))
 os.environ['HERMES_HOME'] = _HERMES_HOME
+# Only the agy producer is substituted below; credential resolution still needs
+# an executable path, which a clean CI runner does not have.
+_FAKE_AGY = os.path.join(_HERMES_HOME, 'agy')
+with open(_FAKE_AGY, 'w') as _f:
+    _f.write('#!/bin/sh\nexit 0\n')
+os.chmod(_FAKE_AGY, 0o755)
+os.environ['AGY_CLI_PATH'] = _FAKE_AGY
 
 # Fallback for a local run without PYTHONPATH; never shadow an explicit checkout.
 sys.path.append(str(Path.home()/'.hermes'/'hermes-agent'))

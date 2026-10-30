@@ -40,10 +40,11 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Install Hermes test dependencies
-        # Hermes main imports these at module load (hermes_yaml -> ruamel.yaml,
-        # local_runtime.processes -> psutil); without them the suite cannot import.
-        run: pip install openai "ruamel.yaml" psutil
+      - name: Install Hermes and its runtime dependencies
+        # Tests import Hermes main, which keeps adding import-time deps
+        # (ruamel.yaml, psutil, python-dotenv, httpx...). Install Hermes'
+        # own declared dependencies instead of chasing them one by one.
+        run: pip install -e ./.hermes-agent
 
       - name: Python tests
         env:

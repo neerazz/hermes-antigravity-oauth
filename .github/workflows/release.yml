@@ -40,11 +40,11 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Install Hermes and its runtime dependencies
-        # Tests import Hermes main, which keeps adding import-time deps
-        # (ruamel.yaml, psutil, python-dotenv, httpx...). Install Hermes'
-        # own declared dependencies instead of chasing them one by one.
-        run: pip install -e ./.hermes-agent
+      - name: Install Hermes runtime dependencies
+        # Tests import Hermes main, which loads these at import time. Hermes
+        # declares its core deps only for Python 3.14 (and that set does not
+        # currently resolve), so `pip install -e .hermes-agent` is not usable.
+        run: pip install openai "ruamel.yaml" psutil python-dotenv httpx requests pyyaml
 
       - name: Python tests
         env:

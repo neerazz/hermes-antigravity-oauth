@@ -655,6 +655,8 @@ def _stub_account_usage():
         fetched_at: datetime
         windows: tuple = ()
         raw: dict | None = None
+        title: str = "Account limits"
+        details: tuple = ()
 
     module = ModuleType("agent.account_usage")
     module.AccountUsageWindow = AccountUsageWindow
@@ -695,14 +697,15 @@ class ProfileHookTests(unittest.TestCase):
 
     def test_hook_maps_report_onto_hermes_snapshot(self):
         report = live_report()
-        with patch.object(self.package_usage, "fetch_usage_report", return_value=report):
+        with patch.object(self.package_usage, "read_cached_usage_report", return_value=report):
             snapshot = self.profile.fetch_account_usage()
 
         from agent.account_usage import AccountUsageWindow
 
         self.assertEqual(snapshot.provider, "antigravity-oauth")
-        self.assertEqual(snapshot.source, "agy_usage")
+        self.assertEqual(snapshot.source, "agy_usage_cache")
         self.assertEqual(snapshot.fetched_at.tzinfo, timezone.utc)
+        self.assertEqual(snapshot.fetched_at, report.fetched_at)
         self.assertEqual(snapshot.raw, report.raw)
         self.assertTrue(all(isinstance(w, AccountUsageWindow) for w in snapshot.windows))
         self.assertEqual(
@@ -711,15 +714,29 @@ class ProfileHookTests(unittest.TestCase):
         )
 
     def test_hook_returns_none_without_report(self):
-        with patch.object(self.package_usage, "fetch_usage_report", return_value=None):
+        with patch.object(self.package_usage, "read_cached_usage_report", return_value=None):
             self.assertIsNone(self.profile.fetch_account_usage())
+
+    def test_hook_missing_cache_never_spawns_or_reads_private_config(self):
+        config = ModuleType("hermes_cli.config")
+        config.load_config_readonly = MagicMock(side_effect=AssertionError("private config"))
+        with tempfile.TemporaryDirectory() as home, \
+             patch.dict(os.environ, {"HERMES_HOME": home}), \
+             patch.dict(sys.modules, {"hermes_cli.config": config}), \
+             patch.object(self.package_usage, "fetch_usage_report", side_effect=AssertionError("refresh")), \
+             patch.object(self.package_usage, "is_authenticated", side_effect=AssertionError("auth")), \
+             patch.object(self.package_usage.subprocess, "Popen", side_effect=AssertionError("process")):
+            for _ in range(3):
+                self.assertIsNone(self.profile.fetch_account_usage())
+            self.assertEqual(list(Path(home).iterdir()), [])
+        config.load_config_readonly.assert_not_called()
 
     @unittest.skipIf(_hermes_account_usage() is None, "needs Hermes runtime deps (httpx, ruamel.yaml)")
     def test_hermes_dispatcher_reaches_hook(self):
         from agent.account_usage import fetch_account_usage
 
         with patch("providers.get_provider_profile", return_value=self.profile), \
-             patch.object(self.package_usage, "fetch_usage_report", return_value=live_report()):
+             patch.object(self.package_usage, "read_cached_usage_report", return_value=live_report()):
             result = fetch_account_usage("antigravity-oauth")
         self.assertIsNotNone(result)
         self.assertTrue(result.available)
@@ -732,7 +749,8 @@ class ProfileHookTests(unittest.TestCase):
 
 def live_report():
     data = LIVE_RESPONSE["command"]["data"]
-    return usage.UsageReport(windows=tuple(usage.usage_windows(data)), raw=LIVE_RESPONSE)
+    return usage.UsageReport(windows=tuple(usage.usage_windows(data)), raw=LIVE_RESPONSE,
+                             fetched_at=datetime(2026, 10, 2, tzinfo=timezone.utc))
 
 
 if __name__ == "__main__":

@@ -11,7 +11,6 @@ import logging
 import os
 import re
 import subprocess
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from providers import register_provider
@@ -163,21 +162,23 @@ class AntigravityOAuthProfile(ProviderProfile):
     def fetch_account_usage(
         self, *, base_url: str | None = None, api_key: str | None = None
     ) -> AccountUsageSnapshot | None:
-        """`/usage` hook: weekly quota windows reported by `agy -p /usage`, or None."""
+        """Cache-only hook. Redraws never authenticate or launch agy."""
         try:
-            from .usage import fetch_usage_report
+            from .usage import read_cached_usage_report
         except ImportError:  # flat source tree under test
-            from usage import fetch_usage_report
+            from usage import read_cached_usage_report
 
-        report = fetch_usage_report()
-        if report is None:
+        report = read_cached_usage_report()
+        if report is None or report.fetched_at is None:
             return None
         from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
 
         return AccountUsageSnapshot(
             provider=self.name,
-            source="agy_usage",
-            fetched_at=datetime.now(timezone.utc),
+            source="agy_usage_cache",
+            fetched_at=report.fetched_at,
+            title=f"Cached quota ({report.raw.get('freshness', 'unverified')})",
+            details=(f"Observed {report.fetched_at.isoformat()}; explicit refresh only, no confirmed automatic refill.",),
             windows=tuple(
                 AccountUsageWindow(
                     label=window.label,

@@ -168,6 +168,7 @@ def _kill_agy_tree(proc: subprocess.Popen) -> None:
                 stderr=subprocess.DEVNULL,
                 timeout=DRAIN_TIMEOUT_S,
                 check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
             )
         return
     # The group id stays reserved while any member is alive, even after the leader exits.

@@ -20,11 +20,75 @@ hermes --provider antigravity-oauth -m '<exact-model-id>'
 - **What it does touch (disclosure):** each agy process runs in a private temp HOME. To let agy reuse its own login there, the plugin symlinks agy's `antigravity-oauth-token` file into that HOME, and on macOS it symlinks `~/Library/Keychains`. Before spawning, it checks the OS keyring for the credential's existence only (`security` / `secret-tool` / `cmdkey`) and never reads the secret. The temp HOME is deleted when the session closes.
 - **Your Hermes SOUL.md is the persona.** Each turn, the plugin writes Hermes' system prompt into agy's private workspace as `GEMINI.md`, which agy loads as first-class rules. That prompt starts with `$HERMES_HOME/SOUL.md`, and the file is added directly if Hermes left it out.
 - **Hermes runs the tools.** agy's built-in tools never execute on your host. When a model calls one anyway, the plugin re-issues it as the matching Hermes tool: `run_command`→`terminal`, `view_file`→`read_file`, `grep_search`/`find_by_name`→`search_files`, `write_to_file`→`write_file`, `search_web`→`web_search`, `read_url_content`→`web_extract`. It then runs under Hermes' approvals and sandbox. Any other native tool is blocked.
-- **`/usage` asks agy for your quota.** `/usage` and `hermes usage` run `agy --version` and then `agy -p /usage --output-format json`, which answers from agy's own session without a model turn. You get one row per quota group, such as `Gemini 7d` and `Claude/GPT 7d`. It only runs when agy is signed in, from a temp folder with your normal HOME and agy's auto-updater turned off.
+- **`/usage` reads cached quota only.** `/usage` and `hermes usage` never launch agy or check authentication. They retain the original observation timestamp and label stale/error observations. Refresh is an explicit, separate action (below).
+
+### Optional quota/reset dock
+
+From the provider checkout, use `python3 usage.py status` for cache-only status,
+or `python3 usage.py refresh` to explicitly request a new observation. Add
+`--json` for structured output. Refresh retains PR3's saved-session and
+agy >=1.1.11 guards, private cwd, auto-update disable switch, shared 7.5-second
+CLI budget and process-tree timeout cleanup. It accepts only a successful
+`/usage` command with zero turns and zero token accounting; no inference,
+login, billing, token reads or model switches are added.
+
+The cache is profile-scoped at
+`$HERMES_HOME/plugin-data/antigravity-oauth/quota/latest.json` (default
+`~/.hermes`), sanitized, atomically replaced with mode 0600, and protected by
+a nonblocking OS writer lock. State ancestry must be trusted; symlink
+directories/files and nonregular/multiply linked state files are refused.
+Readers never create state directories. A failed observation retains prior
+values with error health when state storage remains writable. Cache lifetime
+is 30 minutes; elapsed resets are **due/unconfirmed**, never invented refills.
+
+The pool set is account-driven, not hardcoded: the cache holds one row per
+quota bucket `agy /usage` reports for your account — typically the five-hour
+and weekly windows, plus optional pools such as the Gemini 4 Argon group when
+your plan has one. A new pool surfaces on the next refresh with no plugin
+update; a pool agy does not report stays Unknown rather than an invented
+value, and labels stay unique per provider so rows and alert history key
+stably across renames.
+
+Five-hour and weekly meters are shown independently. If agy reports only
+weekly data, five-hour quota stays **Unknown** and complete pool availability
+cannot be established.
+
+To opt in to the Ink TUI dock, create a small adapter in your active profile's
+`tui-widgets/agy-usage.mjs`, replacing the illustrative path below with the
+provider checkout's absolute path:
+
+```js
+export { default } from 'file:///path/to/hermes-antigravity-oauth/tui/agy-usage.mjs';
+```
+
+Registration is inert; `/agy-usage` toggles the ambient dock without capturing
+composer keys. `/agy-usage refresh` refreshes that dock, `/agy-usage status`
+rereads the cache, and `/agy-usage details` opens exact reset timestamps in a
+closable modal. `R` explicitly refreshes the modal only; reread the dock with
+`/agy-usage status` afterward. `/agy-usage alerts on` opts in to local <=10%
+crossing warnings, deduplicated by fresh healthy observation identity; alerts
+are off initially and cleared when the dock closes. No backend polling or
+collector is installed: timers only update elapsed age/countdowns. The
+argv-only transport uses `HERMES_PYTHON` or `python3` and inherits the active
+profile. Closing or replacing a viewer discards its late results. An explicitly
+started refresh may finish after the dock/modal closes: UI cancellation does
+not terminate its Python supervisor, so it retains the writer lock through
+bounded child cleanup and cache publication. A competing refresh returns
+`refresh_busy`; there are no automatic retries. Pre-cancelled requests never
+spawn, and cache-only status reads remain cancellable. The 15-second outer
+transport timeout is still a last-resort supervisor termination, not a
+process-tree cleanup guarantee; arbitrary OS kills or interpreter crashes can
+also bypass Python cleanup. This optional widget is adapted from the MIT-licensed public
+[quota widget](https://github.com/taylorwtf/hermes-antigravity-oauth-plus/tree/b2bdf8c56966f26552168553bf8cc29470524971).
+
+Offline verification: run the Python files as prescribed by the existing CI
+workflow and `node --test tests/usage_widget.test.mjs`. Widget tests exercise
+SDK lifecycle, geometry, request fencing and warnings, not real terminal
+painting; actual Ink TUI appearance remains a separate manual check.
 
 ## Limitations
 
-- `/usage` needs agy 1.1.11 or newer. On older versions it shows nothing.
+- Explicit quota refresh needs agy 1.1.11 or newer and a saved session. Older versions never receive `/usage` as a prompt; cached reads still work.
 - On Windows, a hung `/usage` call is cleaned up through Hermes' process helper (Hermes 0.21.4 or newer, with psutil installed), which kills everything agy started. Without it, a process agy started can keep running in the background.
 
 ## Install

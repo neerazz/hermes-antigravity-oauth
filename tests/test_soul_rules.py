@@ -12,7 +12,7 @@ if str(plugin_dir) not in sys.path:
     sys.path.insert(0, str(plugin_dir))
 
 import soul  # noqa: E402
-from prompt import _PROMPT_PREAMBLE, _format_messages_as_prompt, _render_message_content  # noqa: E402
+from prompt import _PROMPT_PREAMBLE, _format_delta_prompt, _format_messages_as_prompt, _render_message_content  # noqa: E402
 
 SOUL_TEXT = "# SOUL.md - Test Persona\n\nVerdict first. Never open with pleasantries. Canary: MANGO-31."
 
@@ -61,6 +61,21 @@ class SoulRulesTests(unittest.TestCase):
         self.assertNotIn("SYSTEM-XYZ", ruled)
         self.assertNotIn(_PROMPT_PREAMBLE[0], ruled)
         self.assertIn("hi", ruled)
+
+    def test_transport_rules_forbid_meta_analysis_without_delta_duplication(self):
+        """The fixed contract is stated once, then applied rather than re-introduced each turn."""
+        focus_rule = "Apply it silently: do not spend reasoning or output analysing"
+        messages = [{"role": "system", "content": "SYSTEM-XYZ"}, {"role": "user", "content": "hi"}]
+
+        inline = _format_messages_as_prompt(messages)
+        ruled = _format_messages_as_prompt(messages, rules_in_workspace=True)
+        rules = soul.build_rules(["SYSTEM-XYZ"], _PROMPT_PREAMBLE)
+        delta = _format_delta_prompt([{"role": "tool", "tool_call_id": "t1", "content": "output"}])
+
+        self.assertEqual(inline.count(focus_rule), 1)
+        self.assertEqual(rules.count(focus_rule), 1)
+        self.assertNotIn(focus_rule, ruled)  # Already supplied by GEMINI.md.
+        self.assertNotIn(focus_rule, delta)  # The persistent worker already has the rules.
 
     def test_opt_out_env(self):
         with patch.dict(os.environ, {"ANTIGRAVITY_WORKSPACE_RULES": "0"}):

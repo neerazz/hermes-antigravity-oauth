@@ -24,10 +24,10 @@ hermes config set model.default '<exact-model-id>'
 
 ## Let your AI agent set it up
 
-Copy this prompt into Hermes, Claude Code, Codex, Cursor or any agent with a terminal:
+Copy this prompt into Hermes, Claude Code, Codex, Cursor or any agent with a terminal. Whichever agent you use, it configures Hermes:
 
 ```text
-Set up the hermes-antigravity-oauth plugin for Hermes Agent on this machine.
+Set up the hermes-antigravity-oauth plugin so Hermes Agent on this machine runs on my Google Antigravity plan.
 Fetch https://raw.githubusercontent.com/neerazz/hermes-antigravity-oauth/main/AGENT_SETUP.md and follow it step by step.
 Run every check it lists, stop and ask me at each ASK or HUMAN step, never read or print my agy token,
 and finish with the setup report at the end of that file.

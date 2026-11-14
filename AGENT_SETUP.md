@@ -51,15 +51,16 @@ It opens Google sign-in in the browser. Over SSH it prints a URL, and the user p
 
 Headless host where the user is not at the terminal: the plugin ships a helper. Run it in the background with `python3 "${HERMES_HOME:-$HOME/.hermes}/plugins/antigravity-oauth/scripts/remote-login.py" --code-file /tmp/agy-code.txt`, send the user the printed `LOGIN_URL`, and write the code they send back to `/tmp/agy-code.txt`. The script exits 0 once `agy models` confirms the session. The 60-second window still applies, so the user must act right away.
 
-Check: `hermes auth status antigravity-oauth` says `logged in` and lists a model count.
+Check: `hermes auth status antigravity-oauth` prints `antigravity-oauth: logged in` and a `detail: <N> models available` line.
 
 ## Step 4: Pick a model (ASK)
 
 ```sh
-agy models
+hermes usage --provider antigravity-oauth   # quota left per model group
+agy models                                  # exact model IDs
 ```
 
-Show the user the IDs and ask which one to use. Use the exact ID from the left column, for example `gemini-3.8-flash-medium`. The list depends on their plan and changes over time, so never use an ID from memory. If the user says "you pick", choose a `-medium` variant from the list and say which one you chose.
+Models in a group at `0% remaining` fail until that group resets, so offer only models from groups with quota left. Show the user the IDs and ask which one to use. Use the exact ID from the left column, for example `gemini-3.8-flash-medium`. The list depends on their plan and changes over time, so never use an ID from memory. If the user says "you pick", choose a `-medium` variant from the list and say which one you chose.
 
 ## Step 5: Smoke test
 
@@ -99,7 +100,7 @@ Anything else: run `hermes doctor`, and include the last 30 lines of `$HERMES_HO
 
 ```
 hermes-antigravity-oauth setup: PASS | FAIL at step <n>
-Hermes <version>, agy <version>, plugin enabled: yes|no
+Hermes <version>, agy <version>, plugin enabled: yes|no, plugin commit: <git -C "${HERMES_HOME:-$HOME/.hermes}/plugins/antigravity-oauth" rev-parse --short HEAD>
 Signed in: yes|no (<model count> models)
 Model: <exact id>
 Smoke test: <first line of output>

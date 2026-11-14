@@ -7,11 +7,33 @@
 
 Run [Hermes Agent](https://hermes-agent.nousresearch.com) on the models available to your Google Antigravity plan with a single sign-in.
 
+## Quick start
+
 ```bash
 npx hermes-antigravity-oauth          # install + enable the plugin, then sign in
 agy models                           # choose an exact ID available to your account
 hermes --provider antigravity-oauth -m '<exact-model-id>'
 ```
+
+On a fresh Hermes install with no provider set up yet, Hermes stops with `Hermes isn't configured yet`. Make this plugin the default first:
+
+```bash
+hermes config set model.provider antigravity-oauth
+hermes config set model.default '<exact-model-id>'
+```
+
+## Let your AI agent set it up
+
+Copy this prompt into Hermes, Claude Code, Codex, Cursor or any agent with a terminal:
+
+```text
+Set up the hermes-antigravity-oauth plugin for Hermes Agent on this machine.
+Fetch https://raw.githubusercontent.com/neerazz/hermes-antigravity-oauth/main/AGENT_SETUP.md and follow it step by step.
+Run every check it lists, stop and ask me at each ASK or HUMAN step, never read or print my agy token,
+and finish with the setup report at the end of that file.
+```
+
+The agent checks prerequisites, installs the plugin, hands you the Google sign-in, asks which model to use, runs one test reply, and reports PASS or the exact failing step. [AGENT_SETUP.md](AGENT_SETUP.md) is the runbook it follows, and its last table maps every known error to a fix. Read that table if a setup fails.
 
 ## How it works
 
@@ -22,21 +44,24 @@ hermes --provider antigravity-oauth -m '<exact-model-id>'
 - **Hermes runs the tools.** agy's built-in tools never execute on your host. When a model calls one anyway, the plugin re-issues it as the matching Hermes tool: `run_command`→`terminal`, `view_file`→`read_file`, `grep_search`/`find_by_name`→`search_files`, `write_to_file`→`write_file`, `search_web`→`web_search`, `read_url_content`→`web_extract`. It then runs under Hermes' approvals and sandbox. Any other native tool is blocked.
 - **`/usage` asks agy for your quota.** `/usage` and `hermes usage` run `agy --version` and then `agy -p /usage --output-format json`, which answers from agy's own session without a model turn. You get one row per quota group, such as `Gemini 7d` and `Claude/GPT 7d`. It only runs when agy is signed in, from a temp folder with your normal HOME and agy's auto-updater turned off.
 
+Model-ID handling, context limits and live reasoning are covered in [docs/internals.md](docs/internals.md).
+
 ## Limitations
 
 - `/usage` needs agy 1.1.11 or newer. On older versions it shows nothing.
 - On Windows, a hung `/usage` call is cleaned up through Hermes' process helper (Hermes 0.21.4 or newer, with psutil installed), which kills everything agy started. Without it, a process agy started can keep running in the background.
+- Open issues that affect new users: requests can fail with `RESOURCE_EXHAUSTED` while quota remains ([#27](https://github.com/neerazz/hermes-antigravity-oauth/issues/27)), and agy 1.4+ file tools are not bridged yet ([#19](https://github.com/neerazz/hermes-antigravity-oauth/issues/19)).
 
 ## Install
 
-Requirements: Hermes Agent, plus the Antigravity CLI (`agy`) from <https://antigravity.google/cli>.
+Requirements: Hermes Agent 0.21.0 or newer, plus the Antigravity CLI (`agy`) from <https://antigravity.google/cli>.
 
 | Route | Command |
 |---|---|
 | npx (recommended) | `npx hermes-antigravity-oauth` (add `--yes` to install agy if it is missing) |
 | Hermes directly | `hermes plugins install https://github.com/neerazz/hermes-antigravity-oauth --enable` then `hermes auth add antigravity-oauth` |
 
-npx commands: `install` (default), `login`, `status`, `uninstall`. Flags: `--yes`, `--no-login`, `--force`, and a 40-hex commit SHA to pin the version.
+npx commands: `install` (default), `login`, `status`, `uninstall`. Flags: `--yes`, `--no-login`, `--force`, and a 40-hex commit SHA to pin the version. Hermes may print `Skipped Node deps` during install; that is harmless, because the plugin itself is Python.
 
 ## Auth commands
 
@@ -75,74 +100,7 @@ read from stdin.
 |---|---|---|
 | `ANTIGRAVITY_COMMAND` | `agy` | Path to the agy binary |
 | `ANTIGRAVITY_WORKSPACE_RULES` | `1` | `0` puts SOUL/system prompt inline in the prompt instead of `GEMINI.md` |
-
-### Live model IDs and reasoning
-
-The model picker uses only structurally valid ID/name rows from a successful
-`agy models` call. It preserves exact IDs, case, order, model families and native
-effort variants, deduplicating only identical IDs. Failed, timed-out or incomplete
-discovery returns no catalog; there is no hardcoded fallback list or recommended
-auxiliary model. A successful empty response remains distinct from failure.
-Discovery is bounded and noninteractive; use the auth commands above to sign in.
-
-Selected IDs are passed verbatim to `--model` in both worker and one-shot calls.
-Native effort suffixes own their effort and do not expose a second reasoning
-control; contradictory direct or inherited effort settings cannot rewrite them.
-For a manually entered suffixless `gemini-*` ID, the separate CLI `--effort` flag
-accepts `low`, `medium`, `high`, `xhigh` and `max` without generating a model ID or
-downgrading `max`. Claude and GPT-OSS get no separate flag. Generation-pinned
-aliases and implicit plugin model/effort defaults are not used.
-
-### Context metadata and serving limits
-
-`ANTIGRAVITY_CONTEXT_LENGTH` accepts a positive integer token budget as an explicit
-user override. When unset, invalid or nonpositive, the documented
-`ProviderProfile.get_model_context_length` hook returns `None`, letting Hermes
-resolve the **exact selected ID** through its native metadata. The plugin imposes
-no blanket context capacity and imports no private metadata resolver.
-
-Metadata is not proof of the maximum context served by your account or the CLI.
-Unrecognized exact IDs can receive Hermes' generic unknown-model fallback: for
-example, `gpt-oss-120b-medium` is currently unresolved by the native resolver.
-That fallback is **unknown metadata, not native model capacity**. If necessary,
-set an explicit conservative budget for your route. This change does not establish
-million-token account acceptance; serving limits require separate live testing.
-
-## Live reasoning on non-streaming Hermes turns
-
-`external_process` authentication remains unchanged: Hermes selects its normal
-non-streaming path. For foreground agents with an installed reasoning callback
-and a text-stream consumer, the plugin's collector forwards available reasoning
-while it assembles the response. It calls the existing callback, preserving the
-TUI's show/hide and notification-mute gates. Reasoning remains separate from
-answer/tool content and is never added to the replay prompt.
-
-The profile's main-request projection installs `llm_execution` middleware using
-`PluginContext.register_middleware`. This explicit bootstrap is necessary because
-Hermes' provider discovery imports model-provider plugins but skips their general
-`register(ctx)` lifecycle. Registration is profile-local, idempotent, and uses an
-unloadable host registration handle. Auxiliary projections carry no session ID.
-
-A context-local, single-collector lease fences delivery by profile, provider,
-model, session, turn, request, current callback identity and client liveness.
-Cancellation, closing sessions, request replacement and middleware exit disable
-late delivery. Missing host compatibility seams disable only the optional live
-presentation; completed reasoning and usage remain available. Streaming callers
-continue to receive ordinary chunks, with no extra callback delivery.
-
-This uses read-only host internals for current-agent/session lookup; compatibility
-is tested against the installed Hermes checkout, not guaranteed for all releases.
-Already running processes retain their previously loaded plugin code; this plugin
-does not hot-patch them. No daemon restart or configuration change is performed.
-Agy may return no thinking text even when a request otherwise succeeds. Live
-history restoration and actual frontend rendering are separate from delivery.
-
-The opt-in `scripts/verify_live_reasoning.py` makes one bounded, tool-free call to
-bare `gemini-4-argon` using the existing account. It exercises real AIAgent kwargs,
-the unchanged `_should_stream=False` decision, middleware, the nonstream worker,
-agy/DB reader, collector, and installed TUI reasoning callback. Only UI egress is
-captured; it does not prove display in an existing desktop window. Its receipt
-records counts/times, never reasoning text. See `VERIFICATION.md`.
+| `ANTIGRAVITY_CONTEXT_LENGTH` | unset | Positive integer token budget that overrides Hermes' context metadata ([details](docs/internals.md#context-metadata-and-serving-limits)) |
 
 ## Development
 

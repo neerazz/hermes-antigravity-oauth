@@ -83,7 +83,8 @@ async function login() {
   await ensureAgy();
   const code = run("hermes", ["auth", "add", PLUGIN]);
   if (code !== 0) die("Sign-in did not complete.", code);
-  console.log(`\n✓ Done. Try: hermes --provider ${PLUGIN} -m gemini-3.8-flash`);
+  // No hardcoded model: agy's catalog depends on the account and changes over time.
+  console.log(`\n✓ Done. Pick an exact model ID with \`agy models\`, then run:\n  hermes --provider ${PLUGIN} -m '<exact-model-id>'`);
 }
 
 function status() {

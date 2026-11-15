@@ -1,8 +1,7 @@
 MIT License
 
 Copyright (c) 2026 Neeraj Kumar Singh Beshane
-Copyright (c) 2026 soyelmismo (streaming client, process isolation and keyring probes,
-derived from https://github.com/soyelmismo/hermes-antigravity-subscription at b7ab470)
+Copyright (c) 2026 soyelmismo
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

@@ -3,6 +3,10 @@
 [![npm](https://img.shields.io/npm/v/hermes-antigravity-oauth?logo=npm)](https://www.npmjs.com/package/hermes-antigravity-oauth)
 [![release](https://github.com/neerazz/hermes-antigravity-oauth/actions/workflows/release.yml/badge.svg)](https://github.com/neerazz/hermes-antigravity-oauth/actions/workflows/release.yml)
 [![provenance](https://img.shields.io/badge/npm-provenance-blue)](https://www.npmjs.com/package/hermes-antigravity-oauth#provenance)
+[![downloads](https://img.shields.io/npm/dm/hermes-antigravity-oauth)](https://www.npmjs.com/package/hermes-antigravity-oauth)
+[![stars](https://img.shields.io/github/stars/neerazz/hermes-antigravity-oauth)](https://github.com/neerazz/hermes-antigravity-oauth/stargazers)
+[![Hermes plugin catalog](https://img.shields.io/badge/Hermes-plugin%20catalog-7B3FE4)](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/antigravity-oauth.yaml)
+[![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey)](#install)
 [![license](https://img.shields.io/github/license/neerazz/hermes-antigravity-oauth)](LICENSE)
 
 Run [Hermes Agent](https://hermes-agent.nousresearch.com) on your Google Antigravity plan. One sign-in, no API key.

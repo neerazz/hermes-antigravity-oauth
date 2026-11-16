@@ -1,12 +1,16 @@
 name: release
 
-# Every push to main: test, pick the next version, publish to npm, tag the commit.
-# Publishing uses npm trusted publishing (GitHub OIDC), so the repo stores no npm token.
+# Explicit maintainer dispatch only: test main, then publish to the selected registry.
+# npm uses trusted publishing (OIDC); GitHub Packages uses the ephemeral workflow token.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
+    inputs:
+      registry:
+        description: Package registry to publish to
+        type: choice
+        required: true
+        default: npm
+        options: [npm, github]
 
 concurrency:
   group: release-${{ github.ref }}
@@ -15,62 +19,19 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  # Hermes source the tests import (providers, agent.acp_openai_bridge, hermes_constants).
-  HERMES_AGENT_REF: main
-
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/checkout@v4
-        with:
-          repository: NousResearch/hermes-agent
-          ref: ${{ env.HERMES_AGENT_REF }}
-          path: .hermes-agent
-          fetch-depth: 1
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - name: Install Hermes runtime dependencies
-        # Tests import Hermes main, which loads these at import time. Hermes
-        # declares its core deps only for Python 3.14 (and that set does not
-        # currently resolve), so `pip install -e .hermes-agent` is not usable.
-        run: pip install openai "ruamel.yaml" psutil python-dotenv httpx requests pyyaml
-
-      - name: Python tests
-        env:
-          PYTHONPATH: ${{ github.workspace }}/.hermes-agent:${{ github.workspace }}
-        run: |
-          set -e
-          for t in tests/test_*.py; do
-            echo "::group::$t"
-            python "$t"
-            echo "::endgroup::"
-          done
-
-      - name: CLI smoke
-        run: |
-          node --check bin/cli.js
-          node --check scripts/next-version.js
-          node bin/cli.js help
-          npm pack --dry-run
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
 
   publish:
     needs: test
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write   # push the vX.Y.Z tag
       id-token: write   # npm trusted publishing (OIDC) + provenance
+      packages: write   # scoped GitHub Packages publication
     steps:
       - uses: actions/checkout@v4
         with:
@@ -79,16 +40,63 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
+          registry-url: ${{ inputs.registry == 'github' && 'https://npm.pkg.github.com' || 'https://registry.npmjs.org' }}
+          scope: "@${{ github.repository_owner }}"
 
       - name: Choose version
         id: version
-        run: echo "version=$(node scripts/next-version.js)" >> "$GITHUB_OUTPUT"
+        env:
+          GITHUB_PACKAGE_NAME: "@${{ github.repository_owner }}/hermes-antigravity-oauth"
+          GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+        run: |
+          # Query both registries so a version never identifies two source commits.
+          # Keep this lookup-only auth config isolated from npm trusted publishing.
+          NPM_CONFIG_USERCONFIG=$(mktemp "$RUNNER_TEMP/version-registry.XXXXXX")
+          export NPM_CONFIG_USERCONFIG
+          printf '@%s:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}\n' "$GITHUB_REPOSITORY_OWNER" > "$NPM_CONFIG_USERCONFIG"
+          VERSION=$(node scripts/next-version.js)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Publish to npm
+        if: inputs.registry != 'github'
         run: npm publish --access public --provenance
 
+      - name: Publish to GitHub Packages
+        if: inputs.registry == 'github'
+        env:
+          GITHUB_PACKAGE_NAME: "@${{ github.repository_owner }}/hermes-antigravity-oauth"
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: |
+          npm pkg set "name=$GITHUB_PACKAGE_NAME" "publishConfig.registry=https://npm.pkg.github.com"
+          node -e 'const p=require("./package.json"); if(p.repository?.url !== `git+https://github.com/${process.env.GITHUB_REPOSITORY}.git`) throw Error("Package repository does not match the publishing repository")'
+          npm publish --access public --registry=https://npm.pkg.github.com
+
+      - name: Verify GitHub package download
+        if: inputs.registry == 'github'
+        env:
+          GITHUB_PACKAGE_NAME: "@${{ github.repository_owner }}/hermes-antigravity-oauth"
+          VERSION: ${{ steps.version.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$(mktemp -d "$RUNNER_TEMP/antigravity-package.XXXXXX")"
+          npm view "$GITHUB_PACKAGE_NAME@$VERSION" --json --registry=https://npm.pkg.github.com > registry-metadata.json
+          node -e '
+            const m = require("./registry-metadata.json");
+            if (m.name !== process.env.GITHUB_PACKAGE_NAME || m.version !== process.env.VERSION) throw Error("Wrong package identity");
+            if (m.repository?.url !== `git+https://github.com/${process.env.GITHUB_REPOSITORY}.git`) throw Error("Wrong source repository");
+            if (m.gitHead !== process.env.GITHUB_SHA) throw Error("Wrong source commit");
+            if (!m.description?.trim() || !m.dist?.integrity || m.bin?.["hermes-antigravity-oauth"] !== "bin/cli.js") throw Error("Incomplete package metadata");
+            console.log(JSON.stringify({name:m.name, version:m.version, repository:m.repository.url, gitHead:m.gitHead, integrity:m.dist.integrity}));
+          '
+          npm exec --yes --registry=https://npm.pkg.github.com --package="$GITHUB_PACKAGE_NAME@$VERSION" -- hermes-antigravity-oauth --help
+          {
+            echo "Published $GITHUB_PACKAGE_NAME@$VERSION from $GITHUB_SHA"
+            echo "https://github.com/${GITHUB_REPOSITORY}/pkgs/npm/hermes-antigravity-oauth"
+            echo "GitHub requires registry authentication even for public downloads."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Tag and release
+        if: inputs.registry != 'github'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           GH_TOKEN: ${{ github.token }}

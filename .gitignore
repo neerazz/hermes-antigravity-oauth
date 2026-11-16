@@ -4,3 +4,5 @@ __pycache__/
 node_modules/
 *.tgz
 .DS_Store
+.venv/
+.hermes-agent/

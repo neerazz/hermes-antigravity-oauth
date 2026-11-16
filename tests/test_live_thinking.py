@@ -8,7 +8,6 @@ import sqlite3
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -110,9 +109,12 @@ class LiveThinkingTests(unittest.TestCase):
         reader = ThinkingReader.before_request(self.root)
         c = sqlite3.connect(path)
         c.execute('BEGIN EXCLUSIVE')
-        start = time.monotonic()
-        self.assertEqual(reader.poll('exact'), [])
-        self.assertLess(time.monotonic()-start, .3)
+        # Exercise the real lock, but check the configured SQLite wait rather
+        # than CI wall time, which also includes scheduling/filesystem delays.
+        with patch('thinking.sqlite3.connect', wraps=sqlite3.connect) as connect:
+            self.assertEqual(reader.poll('exact'), [])
+        connect.assert_called_once_with(
+            path.absolute().as_uri() + '?mode=ro', uri=True, timeout=.05)
         c.rollback()
         c.execute('INSERT INTO steps VALUES (1,15,1,?)', (b'\0',))
         c.commit()

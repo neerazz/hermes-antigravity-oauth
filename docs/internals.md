@@ -1,6 +1,6 @@
 # Internals
 
-How the plugin picks model IDs, reports context limits, and shows live reasoning. You do not need any of this to install or use the plugin; start with the [README](../README.md).
+Model selection, context metadata and optional reasoning delivery. Start with the [README](../README.md) to install, or the [architecture and graph](architecture.md) for runtime, credential and tool boundaries.
 
 ## Live model IDs and reasoning
 
@@ -9,7 +9,12 @@ The model picker uses only structurally valid ID/name rows from a successful
 effort variants, deduplicating only identical IDs. Failed, timed-out or incomplete
 discovery returns no catalog; there is no hardcoded fallback list or recommended
 auxiliary model. A successful empty response remains distinct from failure.
-Discovery is bounded and noninteractive; use the auth commands above to sign in.
+Discovery is bounded and noninteractive; use the [README sign-in commands](../README.md#install-and-sign-in) to authenticate.
+
+Existing limitation: the auth handler's post-login command suggestion strips
+`-high`, `-medium` or `-low` from Gemini IDs ([`auth.py`](../auth.py#L99-L106)).
+That suggestion does not follow the exact-ID catalog contract. Copy the ID from
+`agy models`; this documentation change does not alter the auth handler.
 
 Selected IDs are passed verbatim to `--model` in both worker and one-shot calls.
 Native effort suffixes own their effort and do not expose a second reasoning

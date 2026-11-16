@@ -23,12 +23,22 @@ const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
 const local = parse(pkg.version);
 
 let published = null;
-try {
-  const out = execFileSync("npm", ["view", pkg.name, "version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  published = parse(out);
-} catch (err) {
-  const msg = String(err.stderr || err.message);
-  if (!/E404|404 Not Found/.test(msg)) throw err; // only "never published" is allowed to fall through
+const registries = [[pkg.name, "https://registry.npmjs.org"]];
+// The GitHub distribution has a scoped name; keep npm's existing name unchanged.
+if (process.env.GITHUB_PACKAGE_NAME) {
+  registries.push([process.env.GITHUB_PACKAGE_NAME, "https://npm.pkg.github.com"]);
+}
+for (const [name, registry] of registries) {
+  try {
+    const out = execFileSync("npm", ["view", name, "version", "--registry", registry], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    const version = parse(out);
+    if (!published || cmp(version, published) > 0) published = version;
+  } catch (err) {
+    const msg = String(err.stderr || err.message);
+    if (!/E404|404 Not Found/.test(msg)) throw err; // auth/network errors must fail closed
+  }
 }
 
 const next = !published || cmp(local, published) > 0

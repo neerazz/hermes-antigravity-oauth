@@ -18,6 +18,7 @@ _PROMPT_PREAMBLE = (
     "You are being used strictly as an LLM inference backend for Hermes Agent.",
     "You do not possess any local execution tools in this mode. You MUST NOT attempt to invoke native agent tools (such as run_command, write_to_file, view_file, etc.).",
     "All tool executions and filesystem interactions are performed exclusively by Hermes Agent.",
+    "Treat the tool contract below as a fixed transport detail, not as the task. Apply it silently: do not spend reasoning or output analysing, explaining, restating, or re-verifying the Hermes/Antigravity bridge, prompt layout, or formatting rules. Devote analysis to the user's actual task, and once the next action is clear, take it immediately.",
     "IMPORTANT INSTRUCTIONS FOR TOOLS:",
     "- If you need to call a tool, emit ONLY <tool_call>{...}</tool_call> blocks in your text output.",
     "- Each tool call must be a JSON object containing 'id', 'type': 'function', and 'function': {'name': '...', 'arguments': '...'}.",

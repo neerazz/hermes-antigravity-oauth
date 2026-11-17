@@ -88,6 +88,28 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT_SECONDS = 300.0
 
+# Backstop contra turno que nunca retorna. O agy, quando o backend devolve 429
+# (Resource Exhausted), entra em exponential backoff interno (~140s) sem emitir
+# NADA no stdout — o turno fica pendurado até o timeout do Hermes. O
+# --print-timeout faz o agy encerrar o turno e devolver um result estruturado
+# (finished_reason=print_timeout) em vez de pendurar. Fica abaixo dos 300s do
+# Hermes de propósito, para a falha ser nossa, com mensagem clara.
+# Ajuste com ANTIGRAVITY_PRINT_TIMEOUT (valor em segundos, "0"/"off" desliga).
+_PRINT_TIMEOUT_ENV = "ANTIGRAVITY_PRINT_TIMEOUT"
+_PRINT_TIMEOUT_DEFAULT_SECONDS = 240
+
+
+def print_timeout_arg() -> list[str]:
+    """Return the ``--print-timeout`` argv pair, or [] when disabled."""
+    raw = os.getenv(_PRINT_TIMEOUT_ENV, str(_PRINT_TIMEOUT_DEFAULT_SECONDS)).strip().lower()
+    if raw in {"", "0", "off", "none", "false", "no"}:
+        return []
+    # Só um número puro ganha a unidade de segundos; "30" -> "30s", mas "2m"
+    # passa verbatim (o agy valida e é quem conhece as unidades aceitas).
+    if raw.isdigit():
+        raw += "s"
+    return ["--print-timeout", raw]
+
 # Issue #4 (Windows, WinError 32): terminating agy's process tree
 # (taskkill /F /T) is asynchronous, so a child -- or a grandchild -- can
 # still hold conversations/*.db for a short moment after termination
@@ -252,7 +274,10 @@ class AntigravityClient:
         self.api_key = api_key or "antigravity-directsdk"
         self.base_url = base_url or AGY_MARKER_BASE_URL
         self._command = command or resolve_agy_command()
-        self._args = list(args or ["--output-format", "stream-json", "--disable-slash-commands"])
+        self._args = list(
+            args
+            or ["--output-format", "stream-json", "--disable-slash-commands", *print_timeout_arg()]
+        )
         self._temp_dir = None
         if cwd:
             self._cwd = cwd

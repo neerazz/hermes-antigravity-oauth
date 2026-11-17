@@ -25,6 +25,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# How often the idle path tails the isolated agy log for a silent 429. agy
+# writes its retry lines to that log only; without this check the turn hangs
+# for the full client timeout.
+_QUOTA_CHECK_INTERVAL_SECONDS = 1.0
+
 # agy reports a reply cut off at the model's output cap as a result "error".
 # That is an output truncation, not a failed request: surfacing it as a
 # RuntimeError made Hermes read "token limit" as a context overflow and print
@@ -622,6 +627,7 @@ class AntigravityStream(Iterator[Any]):
         start_time = time.monotonic()
 
         gemini_dir = getattr(self.client, "_isolated_gemini_dir", None)
+        next_quota_check = start_time + _QUOTA_CHECK_INTERVAL_SECONDS
         watchdog_stop = threading.Event()
         watchdog_thread: threading.Thread | None = None
 
@@ -665,6 +671,26 @@ class AntigravityStream(Iterator[Any]):
                 if line is None:
                     # Idle poll slice: no stdout yet, loop to service the
                     # thinking reader and early-error checks.
+                    #
+                    # The early-429 check runs HERE, inline, and not only in the
+                    # agy-quota-watchdog thread: that thread stops on the first
+                    # parsed event (``init``, emitted ~2s in, before any model
+                    # request), because its closure keeps an abandoned stream from
+                    # being GC-collectable. A silent 429 appears only in agy's own
+                    # log (never on stdout) several seconds later, so this is the
+                    # only place that sees it. Cost: one 16 KB tail read per
+                    # second, on the thread already blocked on stdout.
+                    if gemini_dir and time.monotonic() >= next_quota_check:
+                        next_quota_check = time.monotonic() + _QUOTA_CHECK_INTERVAL_SECONDS
+                        quota_err = _check_early_quota_error(gemini_dir, min_mtime=start_time)
+                        if quota_err:
+                            self._early_error = quota_err
+                            logger.warning(
+                                "Antigravity process hit early quota limit: %s; terminating to prevent hang.",
+                                quota_err,
+                            )
+                            self.client._terminate_process(self.proc)
+                            raise RuntimeError(f"Antigravity model error: {quota_err}")
                     continue
                 if not line:
                     # `_read_line` returns an empty string exclusively on EOF of the
@@ -681,6 +707,12 @@ class AntigravityStream(Iterator[Any]):
                 except Exception:
                     continue
 
+                # Stopping here is deliberate and load-bearing: the watchdog's
+                # loop closure references this stream, so an abandoned stream is
+                # only cyclic-GC-collectable once the thread exits (see the
+                # ''agy-quota-watchdog'' invariant in tests/test_client_lifecycle.py).
+                # Detection of a silent 429 therefore happens inline in the idle
+                # path below, not in this thread.
                 watchdog_stop.set()
 
                 event_type = event.get("event")
@@ -785,6 +817,7 @@ class AntigravityStream(Iterator[Any]):
                                             text_buffer = ""
 
                 elif event_type == "result":
+                    watchdog_stop.set()
                     res = event.get("result", {})
                     if not self.conversation_id:
                         self.conversation_id = res.get("conversation_id", "")
@@ -793,6 +826,17 @@ class AntigravityStream(Iterator[Any]):
                         usage_data = res["usage"]
                     if "error" in res:
                         error_msg = res["error"]
+                    # agy corta o turno no --print-timeout e devolve um result
+                    # com status SUCCESS e response vazio. Sem tradução isso
+                    # virava "empty result" — mensagem que não diz nada sobre o
+                    # timeout nem sobre 429/quota.
+                    if res.get("finished_reason") == "print_timeout" and not error_msg:
+                        error_msg = (
+                            "print timeout: agy encerrou o turno antes de concluir "
+                            "(sem resposta). Pode ser retry silencioso de 429/quota ou "
+                            "turno lento; veja o log do agy ou aumente "
+                            "ANTIGRAVITY_PRINT_TIMEOUT."
+                        )
                     if _result_reports_output_limit(res) or _is_output_limit_error(error_msg):
                         logger.warning("Antigravity reply hit the output token limit: %s", error_msg or res.get("status", ""))
                         output_truncated = True

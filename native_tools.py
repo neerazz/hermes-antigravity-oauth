@@ -38,22 +38,83 @@ def _terminal(p: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _read_file(p: dict[str, Any]) -> dict[str, Any] | None:
-    path = _pick(p, "AbsolutePath", "path", "file_path", "FilePath")
+    path = _pick(p, "AbsolutePath", "Path", "path", "file_path", "FilePath")
     if not path:
         return None
     out: dict[str, Any] = {"path": str(path)}
+    start_val = None
     if (start := _pick(p, "StartLine", "offset")) is not None:
         try:
-            out["offset"] = max(1, int(start))
+            start_val = max(1, int(start))
+            out["offset"] = start_val
+        except (TypeError, ValueError):
+            pass
+    if (limit := _pick(p, "limit", "Limit")) is not None:
+        try:
+            out["limit"] = max(1, min(2000, int(limit)))
+        except (TypeError, ValueError):
+            pass
+    elif (end := _pick(p, "EndLine")) is not None:
+        try:
+            s_line = start_val or 1
+            out["limit"] = max(1, min(2000, int(end) - s_line + 1))
         except (TypeError, ValueError):
             pass
     return out
 
 
 def _write_file(p: dict[str, Any]) -> dict[str, Any] | None:
-    path = _pick(p, "TargetFile", "path", "AbsolutePath")
+    path = _pick(p, "TargetFile", "Path", "path", "AbsolutePath")
     content = _pick(p, "CodeContent", "content", "Content")
     return {"path": str(path), "content": str(content)} if path and content is not None else None
+
+
+def _edit_file(p: dict[str, Any]) -> dict[str, Any] | None:
+    path = _pick(p, "TargetFile", "Path", "path", "AbsolutePath")
+    old_str = _pick(p, "Target", "old_string", "TargetContent")
+    new_str = _pick(p, "Replacement", "new_string", "ReplacementContent")
+    if new_str is None:
+        lowered = {str(k).lower(): v for k, v in p.items()}
+        for k in ("replacement", "new_string", "replacementcontent"):
+            if k in lowered and lowered[k] is not None:
+                new_str = lowered[k]
+                break
+    if not path or old_str is None or new_str is None:
+        return None
+    out: dict[str, Any] = {"path": str(path), "old_string": str(old_str), "new_string": str(new_str)}
+    if (rep_all := _pick(p, "replace_all", "ReplaceAll", "AllowMultiple")) is not None:
+        out["replace_all"] = bool(rep_all)
+    return out
+
+
+def _search_files_native(p: dict[str, Any]) -> dict[str, Any] | None:
+    pattern = _pick(p, "pattern", "Pattern", "Query", "SearchPattern")
+    if not pattern:
+        return None
+    target = _pick(p, "target")
+    out: dict[str, Any] = {"pattern": str(pattern)}
+    if target in ("content", "files"):
+        out["target"] = str(target)
+    if path := _pick(p, "path", "SearchPath", "SearchDirectory", "Directory", "DirectoryPath"):
+        out["path"] = str(path)
+    if file_glob := _pick(p, "file_glob", "Includes"):
+        out["file_glob"] = str(file_glob)
+    if output_mode := _pick(p, "output_mode"):
+        out["output_mode"] = str(output_mode)
+    for int_key in ("context", "limit", "offset"):
+        if (val := _pick(p, int_key)) is not None:
+            try:
+                out[int_key] = int(val)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def _list_dir(p: dict[str, Any]) -> dict[str, Any] | None:
+    path = _pick(p, "DirectoryPath", "path", "Path")
+    if not path:
+        return None
+    return {"pattern": "*", "target": "files", "path": str(path)}
 
 
 def _search_content(p: dict[str, Any]) -> dict[str, Any] | None:
@@ -90,9 +151,14 @@ def _web_extract(p: dict[str, Any]) -> dict[str, Any] | None:
 NATIVE_TO_HERMES: dict[str, tuple[str, Mapper]] = {
     "run_command": ("terminal", _terminal),
     "view_file": ("read_file", _read_file),
+    "read_file": ("read_file", _read_file),
     "write_to_file": ("write_file", _write_file),
+    "write_file": ("write_file", _write_file),
+    "edit_file": ("patch", _edit_file),
     "grep_search": ("search_files", _search_content),
     "find_by_name": ("search_files", _search_files),
+    "search_files": ("search_files", _search_files_native),
+    "list_dir": ("search_files", _list_dir),
     "search_web": ("web_search", _web_search),
     "read_url_content": ("web_extract", _web_extract),
 }

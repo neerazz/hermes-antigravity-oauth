@@ -781,7 +781,7 @@ class AntigravityPluginTests(unittest.TestCase):
                     if oneshot:
                         client._worker_lock.acquire()
                     try:
-                        with patch("client.subprocess.Popen", return_value=proc) as popen, patch("client.AntigravityStream"), patch.object(client, "_sync_workspace_rules", return_value=False), patch.object(client, "_terminate_process"), _mock_inherited_config("max") as config:
+                        with patch("client.subprocess.Popen", return_value=proc) as popen, patch("client.AntigravityStream"), patch("client.supports_agent_flag", return_value=False), patch.object(client, "_sync_workspace_rules", return_value=False), patch.object(client, "_terminate_process"), _mock_inherited_config("max") as config:
                             client.chat.completions.create(model=model, reasoning_effort="low", messages=[{"role": "user", "content": "fixture"}], stream=True)
                             expected = ["agy"] + ([] if oneshot else ["--input-format", "stream-json"]) + list(client._args) + ["--model", model]
                             self.assertEqual(popen.call_args.args[0], expected)
@@ -824,9 +824,61 @@ class AntigravityPluginTests(unittest.TestCase):
         verdict3 = hook(RuntimeError("stream input cancelled: context canceled"))
         self.assertEqual(verdict3, {"reason": "context_overflow", "retryable": True, "should_compress": True})
 
+        # Test 429 rate limit
+        verdict_rl = hook(RuntimeError("Antigravity model error: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted"))
+        self.assertEqual(verdict_rl, {"reason": "rate_limit", "retryable": False})
+
         # Test unrelated error returns None
         verdict4 = hook(RuntimeError("Invalid API key or unauthorized"))
         self.assertIsNone(verdict4)
+
+    def test_vision_image_materialized_and_read_allowed(self):
+        from prompt import _format_messages_as_prompt
+        png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        with tempfile.TemporaryDirectory() as ws:
+            prompt_text = _format_messages_as_prompt(
+                [{"role": "user", "content": [
+                    {"type": "text", "text": "describe"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}},
+                ]}],
+                workspace_dir=ws,
+            )
+            self.assertIn("hermes_agy_vision_", prompt_text)
+            self.assertIn(ws, prompt_text)
+            self.assertTrue(any(Path(ws).glob("hermes_agy_vision_*.png")))
+
+    def test_omitted_prompt_bytes_added_to_usage(self):
+        from prompt import _format_messages_as_prompt
+        with tempfile.TemporaryDirectory() as ws:
+            client = AntigravityClient(cwd=ws)
+            try:
+                _format_messages_as_prompt(
+                    [{"role": "user", "content": "X" * 10000}, {"role": "user", "content": "latest"}],
+                    max_prompt_chars=2000,
+                    max_prompt_bytes=2000,
+                    workspace_dir=ws,
+                )
+                mock_proc = MagicMock()
+                mock_proc.poll.return_value = 0
+                mock_proc.stdout.readline.side_effect = [
+                    json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": "ok", "usage": {"input_tokens": 500, "output_tokens": 10, "total_tokens": 510}}}) + "\n",
+                    "",
+                ]
+                from stream import AntigravityStream, collect_stream_completion
+                comp = collect_stream_completion(AntigravityStream(proc=mock_proc, client=client, model="gemini-4-hydrogen", timeout=5))
+                self.assertGreater(comp.usage.prompt_tokens, 2000)
+            finally:
+                client.close()
+
+    def test_oversized_workspace_rules_fall_back_to_inline(self):
+        with tempfile.TemporaryDirectory() as ws:
+            client = AntigravityClient(cwd=ws)
+            try:
+                big_sys = [{"role": "system", "content": "Rule line. " * 800}, {"role": "user", "content": "hi"}]
+                self.assertFalse(client._sync_workspace_rules(big_sys))
+                self.assertFalse((Path(ws) / "GEMINI.md").exists())
+            finally:
+                client.close()
 
     def test_hermes_error_classifier_integration(self):
         try:

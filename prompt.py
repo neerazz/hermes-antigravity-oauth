@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import os
 import re
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Sequence
 
@@ -16,7 +21,7 @@ _ROLE_LABELS = {
 
 _PROMPT_PREAMBLE = (
     "You are being used strictly as an LLM inference backend for Hermes Agent.",
-    "You do not possess any local execution tools in this mode. You MUST NOT attempt to invoke native agent tools (such as run_command, write_to_file, view_file, etc.).",
+    "You do not possess any local execution tools in this mode. NEVER invoke native function calling / agent tools (including read_file, write_file, edit_file, search_files, run_command, manage_task, send_message, schedule, grep_search, find_by_name, view_file, write_to_file, etc.) — native tool calls are blocked/rejected.",
     "All tool executions and filesystem interactions are performed exclusively by Hermes Agent.",
     "IMPORTANT INSTRUCTIONS FOR TOOLS:",
     "- If you need to call a tool, emit ONLY <tool_call>{...}</tool_call> blocks in your text output.",
@@ -28,9 +33,68 @@ _PROMPT_PREAMBLE = (
     "- If no tool is needed, respond naturally with standard text.",
 )
 
+_VISION_PREAMBLE = (
+    "You are being used as a multimodal vision analysis backend for Hermes Agent.",
+    "An image file path is provided in the user prompt below (hermes_agy_vision_*).",
+    "Use your read_file tool on that exact image path to inspect the image, then respond directly with your analysis text.",
+)
+
 _TOOL_CALL_PREFIXES = tuple(
     "<tool_call>"[:i] for i in range(len("<tool_call>"), 0, -1)
 )
+
+_CURRENT_WORKSPACE_DIR: str | None = None
+_LAST_OMITTED_BYTES: int = 0
+
+
+def consume_last_omitted_bytes() -> int:
+    """Return and reset the UTF-8 byte count omitted by the most recent prompt assembly."""
+    global _LAST_OMITTED_BYTES
+    val = _LAST_OMITTED_BYTES
+    _LAST_OMITTED_BYTES = 0
+    return val
+
+
+def _materialize_vision_image(url: str) -> str | None:
+    """Materialize a data:image/...;base64,... URI or local image path inside workspace or /tmp."""
+    if not url or not isinstance(url, str):
+        return None
+    u = url.strip()
+    base_dir = Path(_CURRENT_WORKSPACE_DIR) if _CURRENT_WORKSPACE_DIR and os.path.isdir(_CURRENT_WORKSPACE_DIR) else Path("/tmp")
+    if u.startswith("data:image/") and ";base64," in u:
+        header, b64_data = u.split(";base64,", 1)
+        mime_sub = header.split("/", 1)[1].split(";")[0].strip().lower()
+        ext_map = {"jpeg": "jpg", "jpg": "jpg", "png": "png", "webp": "webp", "gif": "gif"}
+        ext = ext_map.get(mime_sub, "jpg")
+        try:
+            raw = base64.b64decode(b64_data)
+        except Exception:
+            return None
+        digest = hashlib.sha256(raw).hexdigest()[:16]
+        target = base_dir / f"hermes_agy_vision_{digest}.{ext}"
+        if not target.is_file():
+            try:
+                fd, tmp_name = tempfile.mkstemp(prefix="hermes_agy_vision_tmp_", dir=str(base_dir))
+                with os.fdopen(fd, "wb") as f:
+                    f.write(raw)
+                os.chmod(tmp_name, 0o600)
+                os.replace(tmp_name, target)
+            except OSError:
+                return None
+        return str(target)
+    if u.startswith("/") and os.path.isfile(u):
+        try:
+            raw = Path(u).read_bytes()
+            ext = Path(u).suffix.lstrip(".") or "jpg"
+            digest = hashlib.sha256(raw).hexdigest()[:16]
+            target = base_dir / f"hermes_agy_vision_{digest}.{ext}"
+            if not target.is_file():
+                target.write_bytes(raw)
+                os.chmod(target, 0o600)
+            return str(target)
+        except OSError:
+            return u
+    return None
 
 
 def _render_message_content(content: Any) -> str:
@@ -47,8 +111,17 @@ def _render_message_content(content: Any) -> str:
             if isinstance(item, str):
                 parts.append(item.strip())
             elif isinstance(item, dict):
-                if item.get("type") == "text":
+                item_type = item.get("type")
+                if item_type == "text":
                     parts.append(str(item.get("text") or "").strip())
+                elif item_type == "image_url":
+                    img_obj = item.get("image_url")
+                    url = img_obj.get("url") if isinstance(img_obj, dict) else img_obj
+                    mat = _materialize_vision_image(str(url or ""))
+                    if mat:
+                        parts.append(
+                            f'[Attached Image File: {mat} — call read_file with Path="{mat}" to inspect this image.]'
+                        )
                 elif "content" in item:
                     parts.append(str(item.get("content") or "").strip())
         return "\n".join(p for p in parts if p).strip()
@@ -61,8 +134,10 @@ def _within_prompt_budget(text: str, max_chars: int, max_bytes: int) -> bool:
 
 def _truncate_middle_to_budget(text: str, max_chars: int, max_bytes: int) -> str:
     """Truncate the middle of ``text`` so it fits within both char and UTF-8 byte budgets."""
+    global _LAST_OMITTED_BYTES
     if _within_prompt_budget(text, max_chars, max_bytes):
         return text
+    _LAST_OMITTED_BYTES += max(0, len(text.encode("utf-8")) - max_bytes)
     marker = f"\n[... truncated {len(text)} chars to fit prompt budget ...]\n"
     avail_chars = max(0, max_chars - len(marker))
     avail_bytes = max(0, max_bytes - len(marker.encode("utf-8")))
@@ -200,9 +275,12 @@ def _fit_transcript_to_budget(
         kept_indices.append(latest_user_idx)
 
     kept_indices.sort()
+    global _LAST_OMITTED_BYTES
     omitted_count = len(entries) - len(kept_indices)
     result: list[str] = []
     if omitted_count > 0:
+        omitted_set = set(range(len(entries))) - set(kept_indices)
+        _LAST_OMITTED_BYTES += sum(len(entries[idx].encode("utf-8")) for idx in omitted_set)
         result.append(omission_template.format(count=omitted_count))
     for pos, idx in enumerate(kept_indices):
         if pos > 0 and idx - kept_indices[pos - 1] > 1 and omitted_count > 0 and pos == 1 and kept_indices[0] == latest_user_idx:
@@ -233,6 +311,7 @@ def _format_messages_as_prompt(
     rules_in_workspace: bool = False,
     max_prompt_chars: int = _MAX_PROMPT_CHARS,
     max_prompt_bytes: int = _MAX_PROMPT_BYTES,
+    workspace_dir: str | None = None,
 ) -> str:
     """Assemble Hermes message history, system prompt, and tool schemas into a canonical prompt.
 
@@ -250,7 +329,9 @@ def _format_messages_as_prompt(
                 + json.dumps(tools, ensure_ascii=False)
             )
 
-    sections: list[str] = [*([] if rules_in_workspace else _PROMPT_PREAMBLE), *tool_sections]
+    global _CURRENT_WORKSPACE_DIR, _LAST_OMITTED_BYTES
+    _CURRENT_WORKSPACE_DIR = workspace_dir
+    _LAST_OMITTED_BYTES = 0
 
     valid_messages = [m for m in messages if isinstance(m, dict)]
     last_msg = valid_messages[-1] if valid_messages else None
@@ -267,6 +348,21 @@ def _format_messages_as_prompt(
                 system_parts.append(rendered)
         else:
             history_messages.append(msg)
+
+    last_user_text = (
+        _render_message_content(last_msg.get("content"))
+        if (last_role == "user" and last_msg is not None)
+        else ""
+    )
+    is_vision_only = (not tools) and ("hermes_agy_vision_" in last_user_text)
+    if is_vision_only:
+        preamble = _VISION_PREAMBLE
+    elif rules_in_workspace:
+        preamble = ()
+    else:
+        preamble = _PROMPT_PREAMBLE
+
+    sections: list[str] = [*preamble, *tool_sections]
 
     if system_parts and not rules_in_workspace:
         sections.append("### SYSTEM INSTRUCTIONS (HERMES AGENT):\n" + "\n\n".join(f"System:\n{p}" for p in system_parts))
@@ -395,14 +491,21 @@ def _format_messages_as_prompt(
             "respond clearly to the user without repeating prior summaries."
         )
     elif last_role == "user" and last_msg is not None:
-        user_text = _render_message_content(last_msg.get("content"))
         footer_section = (
-            f"### LATEST USER REQUEST TO ANSWER:\nUser:\n{user_text}\n\n"
+            f"### LATEST USER REQUEST TO ANSWER:\nUser:\n{last_user_text}\n\n"
             "INSTRUCTION: Respond directly and specifically to the LATEST USER REQUEST above. "
             "Do NOT repeat previous architectural summaries, code reviews, or overview boilerplate unless explicitly asked."
         )
     else:
         footer_section = "Continue the conversation from the latest message."
+
+    base_overhead_text = "\n\n".join(s.strip() for s in sections if s and s.strip())
+    max_footer_chars = max(8000, max_prompt_chars - len(base_overhead_text) - 1024)
+    max_footer_bytes = max(8000, max_prompt_bytes - len(base_overhead_text.encode("utf-8")) - 1024)
+    if not _within_prompt_budget(footer_section, max_footer_chars, max_footer_bytes):
+        footer_section = _truncate_middle_to_budget(footer_section, max_footer_chars, max_footer_bytes)
+        if len(history_messages) == 1 and transcript_items:
+            transcript_items = []
 
     fixed_overhead = "\n\n".join(s.strip() for s in [*sections, footer_section] if s and s.strip())
     transcript = _fit_transcript_to_budget(

@@ -16,11 +16,11 @@ from typing import Any, Iterator, NamedTuple
 
 try:
     from .process import _check_early_quota_error
-    from .prompt import _longest_tool_call_prefix_match, _parse_tool_block
+    from .prompt import _longest_tool_call_prefix_match, _parse_tool_block, consume_last_omitted_bytes
     from . import native_tools as _native_tools
 except ImportError:
     from process import _check_early_quota_error
-    from prompt import _longest_tool_call_prefix_match, _parse_tool_block
+    from prompt import _longest_tool_call_prefix_match, _parse_tool_block, consume_last_omitted_bytes
     import native_tools as _native_tools
 
 logger = logging.getLogger(__name__)
@@ -246,6 +246,7 @@ class AntigravityStream(Iterator[Any]):
         self._interrupted = False
         self._finished = False
         self._early_error: str | None = None
+        self._omitted_tokens: int = max(0, int(consume_last_omitted_bytes()) // 3)
         self._generator = self._stream_generator()
         # Private single-thread executor for the async path, created lazily on
         # the first __anext__ (sync consumers never create one, and a retired
@@ -559,6 +560,9 @@ class AntigravityStream(Iterator[Any]):
         output_tokens = int(usage_data.get("output_tokens", 0) or 0)
         total_tokens = int(usage_data.get("total_tokens", input_tokens + output_tokens) or 0)
         cached_tokens = int(usage_data.get("cache_read_tokens", 0) or 0)
+        if self._omitted_tokens > 0 and input_tokens > 0:
+            input_tokens += self._omitted_tokens
+            total_tokens += self._omitted_tokens
         return input_tokens, output_tokens, total_tokens, cached_tokens
 
     def _empty_result_message(
@@ -620,6 +624,7 @@ class AntigravityStream(Iterator[Any]):
         # agy cut the reply at the output cap (see _is_output_limit_error).
         output_truncated = False
         start_time = time.monotonic()
+        wall_start_time = time.time()
 
         gemini_dir = getattr(self.client, "_isolated_gemini_dir", None)
         watchdog_stop = threading.Event()
@@ -630,7 +635,7 @@ class AntigravityStream(Iterator[Any]):
                 while not watchdog_stop.wait(timeout=0.3):
                     if time.monotonic() - start_time < 1.0:
                         continue
-                    quota_err = _check_early_quota_error(gemini_dir, min_mtime=start_time)
+                    quota_err = _check_early_quota_error(gemini_dir, min_mtime=wall_start_time)
                     if quota_err:
                         self._early_error = quota_err
                         logger.warning(
@@ -681,8 +686,6 @@ class AntigravityStream(Iterator[Any]):
                 except Exception:
                     continue
 
-                watchdog_stop.set()
-
                 event_type = event.get("event")
                 if not self.conversation_id:
                     self.conversation_id = event.get("conversation_id", "")
@@ -696,7 +699,15 @@ class AntigravityStream(Iterator[Any]):
                     step = event.get("step_update", {})
                     if not self.conversation_id:
                         self.conversation_id = step.get("conversation_id", "")
+                    if step.get("step_type") == "tool" or step.get("text_delta") or step.get("thinking_delta"):
+                        watchdog_stop.set()
                     if step.get("step_type") == "tool":
+                        _tn = str(step.get("tool_name") or (step.get("tool_info") or {}).get("name") or "")
+                        _tp = (step.get("tool_info") or {}).get("parameters") or {}
+                        _tpath = str(_tp.get("Path") or _tp.get("AbsolutePath") or _tp.get("path") or "")
+                        if not self.has_tools and _tn in ("read_file", "view_file") and (not _tpath or "hermes_agy_vision_" in _tpath):
+                            logger.info("Antigravity native '%s' allowed for inline vision image '%s'.", _tn, _tpath)
+                            continue
                         call = _native_tools.translate(step, self.tool_names, index=0,
                                                        resolve=self._resolve_truncated) if not has_tool_calls else None
                         if call is not None:
@@ -785,6 +796,7 @@ class AntigravityStream(Iterator[Any]):
                                             text_buffer = ""
 
                 elif event_type == "result":
+                    watchdog_stop.set()
                     res = event.get("result", {})
                     if not self.conversation_id:
                         self.conversation_id = res.get("conversation_id", "")
@@ -914,7 +926,7 @@ class AntigravityStream(Iterator[Any]):
                 # not this exit-code one. A real nonzero exit keeps the
                 # quota/exit-code raise's priority over the generic one.
                 if not neutralized_tool_step and not has_tool_calls and not has_content and returncode not in (None, 0):
-                    quota_err = _check_early_quota_error(gemini_dir, min_mtime=start_time)
+                    quota_err = _check_early_quota_error(gemini_dir, min_mtime=wall_start_time)
                     if quota_err:
                         raise RuntimeError(f"Antigravity model error: {quota_err}")
                     err_detail = error_msg or stderr_out.strip() or f"Process exited with return code {returncode}"
@@ -979,7 +991,7 @@ class AntigravityStream(Iterator[Any]):
                 # fast-crash ("worker process exited with return code 1" /
                 # "didn't answer after 3 attempts"), task t_004f4153.
                 if not neutralized_tool_step and not has_tool_calls and not has_content and worker_exit not in (None, 0):
-                    quota_err = _check_early_quota_error(gemini_dir, min_mtime=start_time)
+                    quota_err = _check_early_quota_error(gemini_dir, min_mtime=wall_start_time)
                     if quota_err:
                         raise RuntimeError(f"Antigravity model error: {quota_err}")
                     # Surface whatever agy wrote to stderr before this crash:

@@ -44,6 +44,23 @@ class TranslateTests(unittest.TestCase):
         c = native_tools.translate(_step("grep_search", {"Query": "foo", "SearchPath": "/r"}), {"search_files"}, 0)
         self.assertEqual(json.loads(c.function.arguments), {"pattern": "foo", "target": "content", "path": "/r"})
 
+    def test_agy15_native_tools_translate_cleanly(self):
+        c = native_tools.translate(_step("read_file", {"path": "/a.py", "offset": 10, "limit": 50}), {"read_file"}, 0)
+        self.assertEqual(c.function.name, "read_file")
+        self.assertEqual(json.loads(c.function.arguments), {"path": "/a.py", "offset": 10, "limit": 50})
+
+        c = native_tools.translate(_step("write_file", {"Path": "/b.py", "CodeContent": "ok"}), {"write_file"}, 0)
+        self.assertEqual(c.function.name, "write_file")
+        self.assertEqual(json.loads(c.function.arguments), {"path": "/b.py", "content": "ok"})
+
+        c = native_tools.translate(_step("edit_file", {"Path": "/b.py", "Target": "old", "Replacement": ""}), {"patch"}, 0)
+        self.assertEqual(c.function.name, "patch")
+        self.assertEqual(json.loads(c.function.arguments), {"path": "/b.py", "old_string": "old", "new_string": ""})
+
+        c = native_tools.translate(_step("search_files", {"pattern": "foo", "path": "/jobs.json", "context": 20}), {"search_files"}, 0)
+        self.assertEqual(c.function.name, "search_files")
+        self.assertEqual(json.loads(c.function.arguments), {"pattern": "foo", "path": "/jobs.json", "context": 20})
+
 
 class StreamBridgeTests(unittest.TestCase):
     def _run(self, events, tools):

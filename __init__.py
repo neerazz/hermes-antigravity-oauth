@@ -256,6 +256,18 @@ def _classify_antigravity_error(
             "retryable": True,
             "should_compress": True,
         }
+    if any(
+        pattern in err_str
+        for pattern in (
+            "resource_exhausted",
+            "code 429",
+            "quota reached",
+        )
+    ):
+        return {
+            "reason": "rate_limit",
+            "retryable": False,
+        }
     return None
 
 

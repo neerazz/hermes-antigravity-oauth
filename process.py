@@ -558,7 +558,37 @@ def setup_isolated_home(cwd: Path | str) -> tuple[Path, Path]:
                         shutil.copy2(real_token, isolated_token)
 
     _link_macos_keychains(isolated_home)
+    _write_isolated_agy_config(isolated_home)
     return isolated_home, isolated_gemini_dir
+
+
+def _write_isolated_agy_config(isolated_home: Path) -> None:
+    """Seed nonWorkspaceFileAccessPolicy=ALLOW and the hermes-pure agent inside isolated HOME."""
+    with contextlib.suppress(OSError):
+        cfg_dir = Path(isolated_home) / ".gemini" / "config"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        (cfg_dir / ".migrated").touch(exist_ok=True)
+        cfg_file = cfg_dir / "config.json"
+        if not cfg_file.is_file():
+            cfg_file.write_text(
+                '{"userSettings":{"autoExecutionPolicy":"CASCADE_COMMANDS_AUTO_EXECUTION_EAGER",'
+                '"nonWorkspaceFileAccessPolicy":"AGENT_SETTING_POLICY_ALLOW",'
+                '"enableTerminalSandbox":false,"permissionGrantsV2Migrated":true,"useAiCredits":false}}\n',
+                encoding="utf-8",
+            )
+        agents_dir = Path(isolated_home) / ".gemini" / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        pure_agent = agents_dir / "hermes-pure.md"
+        pure_content = (
+            "---\n"
+            "name: hermes-pure\n"
+            "description: Hermes Agent LLM inference backend\n"
+            "tools: [read_file, write_file, edit_file, run_command, search_web]\n"
+            "---\n"
+            "Follow the Hermes Agent prompt instructions strictly and emit <tool_call>{...}</tool_call> tags when calling Hermes tools.\n"
+        )
+        if not pure_agent.is_file() or pure_agent.read_text(encoding="utf-8") != pure_content:
+            pure_agent.write_text(pure_content, encoding="utf-8")
 
 
 def _link_macos_keychains(isolated_home: Path) -> None:
@@ -645,6 +675,8 @@ def _check_early_quota_error(
             content = f.read()
 
         for line in reversed(content.splitlines()):
+            if "Sending user message to conversation" in line or "Forwarding user message to conversation" in line:
+                break
             if "RESOURCE_EXHAUSTED" in line and (
                 "Individual quota reached" in line
                 or "quota exceeded" in line.lower()
@@ -664,3 +696,32 @@ def _check_early_quota_error(
         pass
     return None
 
+
+
+_AGENT_FLAG_CACHE: dict[str, bool] = {}
+
+
+def supports_agent_flag(command: str) -> bool:
+    """Return True if the resolved agy binary supports ``--agent`` (without invoking Popen)."""
+    cached = _AGENT_FLAG_CACHE.get(command)
+    if cached is not None:
+        return cached
+    supported = False
+    try:
+        resolved = shutil.which(command) or command
+        p = Path(resolved)
+        if p.is_file():
+            p = p.resolve()
+            needle = b"Agent for the current CLI session"
+            tail = b""
+            with p.open("rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    buf = tail + chunk
+                    if needle in buf:
+                        supported = True
+                        break
+                    tail = buf[-len(needle):]
+    except Exception:
+        supported = False
+    _AGENT_FLAG_CACHE[command] = supported
+    return supported

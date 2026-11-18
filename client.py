@@ -37,6 +37,7 @@ try:
         resolve_agy_command,
         resolve_real_token_path,
         setup_isolated_home,
+        supports_agent_flag,
         terminate_process,
     )
     from .prompt import (
@@ -68,6 +69,7 @@ except ImportError:
         resolve_agy_command,
         resolve_real_token_path,
         setup_isolated_home,
+        supports_agent_flag,
         terminate_process,
     )
     from prompt import (
@@ -299,6 +301,7 @@ class AntigravityClient:
         self._worker_conversation_id = ""
         self._worker_model: str | None = None
         self._worker_effort: str | None = None
+        self._worker_agent: str | None = None
         self._worker_history: list[dict[str, Any]] = []
         # Cumulative usage snapshot of the current worker session. agy 1.2.10+
         # persistent workers report cumulative session usage, so per-turn
@@ -460,8 +463,14 @@ class AntigravityClient:
         retires the running worker, because agy reads rules at session start.
         """
         if not _soul.rules_enabled():
+            with contextlib.suppress(OSError):
+                (Path(self._cwd) / _soul.RULES_FILENAME).unlink()
             return False
         rules = _soul.build_rules(_soul.system_parts_of(messages, _render_message_content), _PROMPT_PREAMBLE)
+        if len(rules.encode("utf-8")) > 5500:
+            with contextlib.suppress(OSError):
+                (Path(self._cwd) / _soul.RULES_FILENAME).unlink()
+            return False
         try:
             digest = _soul.write_rules(self._cwd, rules)
         except OSError as exc:
@@ -474,19 +483,32 @@ class AntigravityClient:
             self._terminate_worker()
         return True
 
-    def _get_or_spawn_worker(self, model: str, effort: str | None) -> subprocess.Popen:
+    def _pure_agent_args(self, *, is_vision: bool = False) -> list[str]:
+        if is_vision or "--agent" in self._args:
+            return []
+        if os.getenv("ANTIGRAVITY_PURE_AGENT", "1").strip().lower() in {"0", "false", "no", "off"}:
+            return []
+        agent_file = Path(self._isolated_home) / ".gemini" / "agents" / "hermes-pure.md"
+        if agent_file.is_file() and supports_agent_flag(self._command):
+            return ["--agent", "hermes-pure"]
+        return []
+
+    def _get_or_spawn_worker(self, model: str, effort: str | None, agent_args: list[str] | None = None) -> subprocess.Popen:
         with self._lock:
             if (
                 self._worker_proc is not None
                 and self._worker_proc.poll() is None
                 and self._worker_model == model
                 and self._worker_effort == effort
+                and self._worker_agent == (agent_args[1] if agent_args and len(agent_args) > 1 else None)
             ):
                 return self._worker_proc
 
             self._terminate_worker_locked()
 
             cmd_args = [self._command, "--input-format", "stream-json", *self._args]
+            if agent_args:
+                cmd_args.extend(agent_args)
             if model:
                 cmd_args.extend(["--model", model])
             if effort:
@@ -509,6 +531,7 @@ class AntigravityClient:
             self._worker_conversation_id = ""
             self._worker_model = model
             self._worker_effort = effort
+            self._worker_agent = agent_args[1] if agent_args and len(agent_args) > 1 else None
             self._worker_history = []
             self._worker_usage_baseline = {}
             self._active_processes.add(proc)
@@ -526,11 +549,16 @@ class AntigravityClient:
         stream: bool,
         reasoning_emitter=None,
     ) -> Any:
-        rules = self._sync_workspace_rules(messages)
-        prompt_text = _format_messages_as_prompt(
-            messages, model=model, tools=tools, tool_choice=tool_choice, rules_in_workspace=rules
+        is_vision = (not tools) and any(
+            "hermes_agy_vision_" in _render_message_content(m.get("content"))
+            for m in messages[-1:] if isinstance(m, dict) and str(m.get("role") or "").lower() == "user"
         )
-        cmd_args = [self._command, *self._args]
+        rules = False if is_vision else self._sync_workspace_rules(messages)
+        prompt_text = _format_messages_as_prompt(
+            messages, model=model, tools=tools, tool_choice=tool_choice,
+            rules_in_workspace=rules, workspace_dir=self._cwd,
+        )
+        cmd_args = [self._command, *self._args, *self._pure_agent_args(is_vision=is_vision)]
         if model:
             cmd_args.extend(["--model", model])
         if effort:
@@ -617,8 +645,13 @@ class AntigravityClient:
         worker_acquired = self._worker_lock.acquire(blocking=False)
         if worker_acquired:
             try:
-                rules = self._sync_workspace_rules(messages_list)
-                proc = self._get_or_spawn_worker(resolved_model, effort)
+                is_vision = (not tools) and any(
+                    "hermes_agy_vision_" in _render_message_content(m.get("content"))
+                    for m in messages_list[-1:] if isinstance(m, dict) and str(m.get("role") or "").lower() == "user"
+                )
+                agent_args = self._pure_agent_args(is_vision=is_vision)
+                rules = False if is_vision else self._sync_workspace_rules(messages_list)
+                proc = self._get_or_spawn_worker(resolved_model, effort, agent_args)
                 with self._lock:
                     is_continuation = _messages_match_prefix(self._worker_history, messages_list)
 
@@ -628,10 +661,10 @@ class AntigravityClient:
                 else:
                     if self._worker_history:
                         self._terminate_worker()
-                        proc = self._get_or_spawn_worker(resolved_model, effort)
+                        proc = self._get_or_spawn_worker(resolved_model, effort, agent_args)
                     prompt_payload = _format_messages_as_prompt(
                         messages_list, model=resolved_model, tools=tools, tool_choice=tool_choice,
-                        rules_in_workspace=rules,
+                        rules_in_workspace=rules, workspace_dir=self._cwd,
                     )
 
                 thinking_reader = ThinkingReader.before_request(self._isolated_gemini_dir)
@@ -641,10 +674,10 @@ class AntigravityClient:
                     proc.stdin.flush()
                 except (BrokenPipeError, OSError):
                     self._terminate_worker()
-                    proc = self._get_or_spawn_worker(resolved_model, effort)
+                    proc = self._get_or_spawn_worker(resolved_model, effort, agent_args)
                     prompt_payload = _format_messages_as_prompt(
                         messages_list, model=resolved_model, tools=tools, tool_choice=tool_choice,
-                        rules_in_workspace=rules,
+                        rules_in_workspace=rules, workspace_dir=self._cwd,
                     )
                     thinking_reader.close()
                     thinking_reader = ThinkingReader.before_request(self._isolated_gemini_dir)

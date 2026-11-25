@@ -62,6 +62,32 @@ class SoulRulesTests(unittest.TestCase):
         self.assertNotIn(_PROMPT_PREAMBLE[0], ruled)
         self.assertIn("hi", ruled)
 
+    def test_agy_429_trigger_lines_are_reworded(self):
+        prompt = "\n".join((
+            "For help, see https://hermes-agent.nousresearch.com/docs for details.",
+            "# Google model operational directives",
+            "<!-- End Hermes runtime environment -->",
+            "When asked to build something, the deliverable is a working artifact backed by real "
+            "tool output — not a description of one.",
+            "Reporting a blocker honestly is always better than inventing a result.",
+            "Mid-turn, the user can steer you: Hermes delivers their message as a standalone user message right after the latest tool results, wrapped exactly as:",
+        ))
+        rules = soul.build_rules([prompt], _PROMPT_PREAMBLE)
+        for marker in (
+            "https://hermes-agent.nousresearch.com/docs",
+            "# Google model operational directives",
+            "<!-- End Hermes runtime environment -->",
+            "the deliverable is a working artifact backed by real tool output",
+            "Reporting a blocker honestly is always better than inventing a result.",
+            "Mid-turn, the user can steer you: Hermes delivers their message as a standalone user message right after the latest tool results, wrapped exactly as:",
+        ):
+            self.assertNotIn(marker, rules)
+        self.assertIn("the official documentation", rules)
+        self.assertIn("## Provider-specific guidance", rules)
+        self.assertIn("produce it for real and report what actually ran", rules)
+        self.assertIn("Say plainly when something is blocked.", rules)
+        self.assertIn("A separate runtime marker may carry the next real user message.", rules)
+
     def test_opt_out_env(self):
         with patch.dict(os.environ, {"ANTIGRAVITY_WORKSPACE_RULES": "0"}):
             self.assertFalse(soul.rules_enabled())

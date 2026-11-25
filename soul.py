@@ -35,6 +35,8 @@ _RULE_REWRITES = (
      "produce it for real and report what actually ran"),
     (re.compile(r"Reporting a blocker honestly is always better than inventing a result\."),
      "Say plainly when something is blocked."),
+    (re.compile(r"(?m)^Mid-turn, the user can steer you: Hermes delivers their message as a standalone user message right after the latest tool results, wrapped exactly as:[ \t]*$"),
+     "A separate runtime marker may carry the next real user message."),
 )
 
 

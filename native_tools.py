@@ -171,22 +171,39 @@ def translate(step: dict[str, Any], available: set[str], index: int,
     """Return a Hermes tool-call delta for an agy native tool step, or None if it cannot be mapped."""
     native = str(step.get("tool_name") or (step.get("tool_info") or {}).get("name") or "")
     mapping = NATIVE_TO_HERMES.get(native)
-    if not mapping:
-        return None
-    hermes_name, mapper = mapping
-    if hermes_name not in available:
-        return None
-    params = (step.get("tool_info") or {}).get("parameters")
-    if not isinstance(params, dict):
-        return None
-    if truncated_keys(params):
-        # Never hand Hermes a cut command: restore the full text or refuse to translate.
-        params = resolve(params, native) if resolve else None
-        if params is None:
+    if mapping is not None:
+        hermes_name, mapper = mapping
+        if hermes_name not in available:
             return None
-    args = mapper(params)
-    if args is None:
-        return None
-    ident = f"agy_{step.get('step_index', index)}_{native}"
-    return SimpleNamespace(index=index, id=ident, type="function",
-                           function=SimpleNamespace(name=hermes_name, arguments=json.dumps(args, ensure_ascii=False)))
+        params = (step.get("tool_info") or {}).get("parameters")
+        if not isinstance(params, dict):
+            return None
+        if truncated_keys(params):
+            # Never hand Hermes a cut command: restore the full text or refuse to translate.
+            params = resolve(params, native) if resolve else None
+            if params is None:
+                return None
+        args = mapper(params)
+        if args is None:
+            return None
+        ident = f"agy_{step.get('step_index', index)}_{native}"
+        return SimpleNamespace(index=index, id=ident, type="function",
+                               function=SimpleNamespace(name=hermes_name, arguments=json.dumps(args, ensure_ascii=False)))
+    # Hermes-native name not present in the explicit agy map (e.g. execute_code,
+    # delegate_task, skill_view, or any tool Hermes offered this turn): the model
+    # invoked a Hermes tool by its own name and schema, so the parameters are
+    # already Hermes-shaped. Re-issue the call verbatim through Hermes' tool
+    # layer instead of neutralizing the step and dropping the model's intent.
+    # Gated on `native in available` so a hallucinated name still fails closed.
+    if native in available:
+        params = (step.get("tool_info") or {}).get("parameters")
+        if not isinstance(params, dict):
+            return None
+        if truncated_keys(params):
+            params = resolve(params, native) if resolve else None
+            if params is None:
+                return None
+        ident = f"agy_{step.get('step_index', index)}_{native}"
+        return SimpleNamespace(index=index, id=ident, type="function",
+                               function=SimpleNamespace(name=native, arguments=json.dumps(params, ensure_ascii=False)))
+    return None

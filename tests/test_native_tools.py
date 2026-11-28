@@ -44,6 +44,27 @@ class TranslateTests(unittest.TestCase):
         c = native_tools.translate(_step("grep_search", {"Query": "foo", "SearchPath": "/r"}), {"search_files"}, 0)
         self.assertEqual(json.loads(c.function.arguments), {"pattern": "foo", "target": "content", "path": "/r"})
 
+    def test_hermes_native_name_is_passed_through_verbatim(self):
+        # A Hermes tool name the model was given this turn is re-issued as-is,
+        # even when it is not in the explicit agy-name map.
+        c = native_tools.translate(_step("execute_code", {"code": "print(1)"}), {"execute_code"}, 0)
+        self.assertEqual(c.function.name, "execute_code")
+        self.assertEqual(json.loads(c.function.arguments), {"code": "print(1)"})
+        self.assertEqual(c.id, "agy_2_execute_code")
+
+    def test_hermes_native_name_requires_availability(self):
+        # Same name, but not among the tools Hermes offered this turn: fail closed.
+        self.assertIsNone(native_tools.translate(_step("execute_code", {"code": "x"}), {"terminal"}, 0))
+
+    def test_hermes_native_name_restores_truncated_params(self):
+        truncated = "x" * 512 + "\u2026"
+        restored = {"code": truncated + "rest"}
+        resolve = MagicMock(return_value=restored)
+        c = native_tools.translate(_step("execute_code", {"code": truncated}), {"execute_code"}, 0,
+                                   resolve=resolve)
+        self.assertEqual(json.loads(c.function.arguments), restored)
+        resolve.assert_called_once()
+
 
 class StreamBridgeTests(unittest.TestCase):
     def _run(self, events, tools):
